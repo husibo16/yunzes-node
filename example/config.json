@@ -1,0 +1,43 @@
+{
+    "Log": {
+        "Level": "debug",
+        "Output": ""
+    },
+    "Cores": [
+        {
+            "Type":"xray",
+            "Log": {
+                "Level": "debug"
+            }
+        }
+    ],
+    "Nodes": [
+        {
+            "Core": "xray",
+            "ApiHost": "http://127.0.0.1:8080/",
+            "ApiKey": "12345678",
+            "NodeID": 1,
+            "NodeType": "vless",
+            "Timeout": 30,
+            "ListenIP": "0.0.0.0",
+            "SendIP": "0.0.0.0",
+            "DeviceOnlineMinTraffic": 1000,
+            "EnableProxyProtocol": false,
+            "EnableUot": true,
+            "EnableTFO": true,
+            "DNSType": "UseIPv4",
+            "CertConfig": {
+                "CertMode": "none",
+                "RejectUnknownSni": false,
+                "CertDomain": "ppanel.test",
+                "CertFile": "/etc/ppanel-node/node.crt",
+                "KeyFile": "/etc/ppanel-node/node.key",
+                "Email": "ppanel@github.com",
+                "Provider": "cloudflare",
+                "DNSEnv": {
+                    "CF_DNS_API_TOKEN":"1234567890abcdefghijklmnopqrstuvwxyz"
+                }
+            }
+        }
+    ]
+}

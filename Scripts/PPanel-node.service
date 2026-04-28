@@ -1,0 +1,20 @@
+[Unit]
+Description=PPanel-node Service
+After=network.target nss-lookup.target
+Wants=network.target
+
+[Service]
+User=root
+Group=root
+Type=simple
+LimitAS=infinity
+LimitRSS=infinity
+LimitCORE=infinity
+LimitNOFILE=999999
+WorkingDirectory=/usr/local/PPanel-node/
+ExecStart=/usr/local/PPanel-node/ppnode server -c /etc/PPanel-node/config.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
