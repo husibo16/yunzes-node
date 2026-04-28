@@ -1,7 +1,7 @@
 package node
 
 import (
-	"strconv"
+	"fmt"
 
 	"github.com/perfect-panel/ppanel-node/api/panel"
 	"github.com/perfect-panel/ppanel-node/common/serverstatus"
@@ -68,25 +68,31 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	return nil
 }
 
+// userKey returns a stable identity that captures every field the node-side
+// limiter cares about. The pipe separator avoids ambiguity between e.g.
+// (uuid="u", speed=123) and (uuid="u1", speed=23).
+func userKey(u panel.UserInfo) string {
+	return fmt.Sprintf("%s|%d|%d", u.Uuid, u.SpeedLimit, u.DeviceLimit)
+}
+
 func compareUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
+	oldMap := make(map[string]int, len(old))
+	for i, u := range old {
+		oldMap[userKey(u)] = i
 	}
 
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
+	for _, u := range new {
+		k := userKey(u)
+		if _, exists := oldMap[k]; !exists {
+			added = append(added, u)
 		} else {
-			delete(oldMap, key)
+			delete(oldMap, k)
 		}
 	}
 
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
+	for _, idx := range oldMap {
+		deleted = append(deleted, old[idx])
 	}
 
-	return deleted, added
+	return
 }
