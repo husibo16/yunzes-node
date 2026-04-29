@@ -38,15 +38,54 @@ func NewController(server vCore.Core, api *panel.Client, config *conf.Options) *
 	return controller
 }
 
-// Start implement the Start() function of the service interface
-func (c *Controller) Start() error {
-	// First fetch Node Info
-	var err error
+// protocolSecurity returns the security mode that applies to a given node's
+// inbound. "tls" requires an X.509 cert (file/ACME/self). "reality" uses xray
+// reality keys (no cert needed). "" means cleartext (e.g. shadowsocks).
+func protocolSecurity(node *panel.NodeInfo) string {
+	switch node.Common.Protocol {
+	case "vless":
+		if node.Common.Vless != nil {
+			return node.Common.Vless.Security
+		}
+	case "vmess":
+		if node.Common.Vmess != nil {
+			return node.Common.Vmess.Security
+		}
+	case "trojan":
+		if node.Common.Trojan != nil {
+			return node.Common.Trojan.Security
+		}
+	case "tuic", "hysteria", "hysteria2", "anytls":
+		return "tls"
+	case "shadowsocks":
+		return ""
+	}
+	return ""
+}
+
+// needsCert reports whether a security mode requires the controller to drive
+// the X.509 cert path (requestCert + renewCertTask). Only "tls" does;
+// "reality" carries its own keypair, "" / "none" are cleartext.
+func needsCert(security string) bool {
+	return security == "tls"
+}
+
+// Start brings the controller online. The order is:
+//  1. fetch node + users + alive map
+//  2. resolve tag
+//  3. requestCert if the protocol needs TLS
+//  4. add limiter
+//  5. AddNode (server inbound)
+//  6. AddUsers
+//  7. startTasks
+//
+// Steps 4-7 are guarded by a deferred rollback: any failure undoes the prior
+// successful steps so we never leave a half-built controller behind.
+func (c *Controller) Start() (err error) {
 	node, err := c.apiClient.GetNodeInfo()
 	if err != nil {
 		return fmt.Errorf("get node info error: %s", err)
 	}
-	// Update user
 	c.userList, err = c.apiClient.GetUserList()
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
@@ -64,38 +103,36 @@ func (c *Controller) Start() error {
 		c.tag = c.Options.Name
 	}
 
-	// add limiter
-	l := limiter.AddLimiter(c.tag, &c.LimitConfig, c.userList, c.aliveMap)
-	c.limiter = l
-	var security string
-	switch node.Common.Protocol {
-	case "vless":
-		security = node.Common.Vless.Security
-	case "vmess":
-		security = node.Common.Vmess.Security
-	case "trojan":
-		security = node.Common.Trojan.Security
-	case "shadowsocks":
-		security = ""
-	case "tuic":
-		security = "tls"
-	case "hysteria", "hysteria2":
-		security = "tls"
-	default:
-		security = ""
-	}
-
-	if security == "tls" {
-		err = c.requestCert()
-		if err != nil {
+	security := protocolSecurity(node)
+	if needsCert(security) {
+		if err = c.requestCert(); err != nil {
 			return fmt.Errorf("request cert error: %s", err)
 		}
 	}
-	// Add new tag
-	err = c.server.AddNode(c.tag, node, c.Options)
-	if err != nil {
+
+	// Rollback ladder: anything past this point that errors must undo the
+	// preceding successful steps.
+	c.limiter = limiter.AddLimiter(c.tag, &c.LimitConfig, c.userList, c.aliveMap)
+	addedNode := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		if addedNode {
+			if delErr := c.server.DelNode(c.tag); delErr != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "err": delErr}).
+					Error("rollback DelNode failed")
+			}
+		}
+		limiter.DeleteLimiter(c.tag)
+		c.limiter = nil
+	}()
+
+	if err = c.server.AddNode(c.tag, node, c.Options); err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
+	addedNode = true
+
 	added, err := c.server.AddUsers(&vCore.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,
@@ -106,13 +143,18 @@ func (c *Controller) Start() error {
 	}
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	c.info = node
-	c.startTasks(node)
+	if err = c.startTasks(node); err != nil {
+		return fmt.Errorf("start tasks error: %s", err)
+	}
 	return nil
 }
 
-// Close implement the Close() function of the service interface
+// Close tears down the controller. Safe to call on a half-initialized
+// controller (empty tag, nil limiter, nil tasks).
 func (c *Controller) Close() error {
-	limiter.DeleteLimiter(c.tag)
+	if c.tag != "" {
+		limiter.DeleteLimiter(c.tag)
+	}
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
 	}
@@ -125,8 +167,10 @@ func (c *Controller) Close() error {
 	if c.dynamicSpeedLimitPeriodic != nil {
 		c.dynamicSpeedLimitPeriodic.Close()
 	}
-	err := c.server.DelNode(c.tag)
-	if err != nil {
+	if c.tag == "" || c.server == nil {
+		return nil
+	}
+	if err := c.server.DelNode(c.tag); err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}
 	return nil

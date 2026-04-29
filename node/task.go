@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/husibo16/yunzes-node/api/panel"
@@ -10,41 +11,24 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (c *Controller) startTasks(node *panel.NodeInfo) {
-	// fetch node info task
+func (c *Controller) startTasks(node *panel.NodeInfo) error {
 	c.nodeInfoMonitorPeriodic = &task.Task{
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
 	}
-	// fetch user list task
 	c.userReportPeriodic = &task.Task{
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
-	// delay to start nodeInfoMonitor
-	_ = c.nodeInfoMonitorPeriodic.Start(false)
-	log.WithField("tag", c.tag).Info("Start report node status")
-	_ = c.userReportPeriodic.Start(false)
-	var security string
-	switch node.Common.Protocol {
-	case "vless":
-		security = node.Common.Vless.Security
-	case "vmess":
-		security = node.Common.Vmess.Security
-	case "trojan":
-		security = node.Common.Trojan.Security
-	case "shadowsocks":
-		security = ""
-	case "tuic":
-		security = "tls"
-	case "hysteria", "hysteria2":
-		security = "tls"
-	default:
-		security = ""
+	if err := c.nodeInfoMonitorPeriodic.Start(false); err != nil {
+		return fmt.Errorf("start nodeInfoMonitor task: %w", err)
 	}
-
-	if security == "tls" {
+	log.WithField("tag", c.tag).Info("Start report node status")
+	if err := c.userReportPeriodic.Start(false); err != nil {
+		return fmt.Errorf("start userReport task: %w", err)
+	}
+	if needsCert(protocolSecurity(node)) && c.CertConfig != nil {
 		switch c.CertConfig.CertMode {
 		case "none", "", "file", "self":
 		default:
@@ -53,8 +37,9 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 				Execute:  c.renewCertTask,
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
-			// delay to start renewCert
-			_ = c.renewCertPeriodic.Start(true)
+			if err := c.renewCertPeriodic.Start(true); err != nil {
+				return fmt.Errorf("start renewCert task: %w", err)
+			}
 		}
 	}
 	if c.LimitConfig.EnableDynamicSpeedLimit {
@@ -65,6 +50,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		}
 		log.Printf("[%s: %d] Start dynamic speed limit", c.apiClient.NodeType, c.apiClient.NodeId)
 	}
+	return nil
 }
 
 func (c *Controller) nodeInfoMonitor() (err error) {
@@ -127,26 +113,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			c.limiter.AliveList = newA
 		}
 
-		// check cert
-		var security string
-		switch newN.Common.Protocol {
-		case "vless":
-			security = newN.Common.Vless.Security
-		case "vmess":
-			security = newN.Common.Vmess.Security
-		case "trojan":
-			security = newN.Common.Trojan.Security
-		case "shadowsocks":
-			security = ""
-		case "tuic":
-			security = "tls"
-		case "hysteria", "hysteria2":
-			security = "tls"
-		default:
-			security = ""
-		}
-
-		if security == "tls" {
+		if needsCert(protocolSecurity(newN)) && c.CertConfig != nil {
 			err = c.requestCert()
 			if err != nil {
 				log.WithFields(log.Fields{

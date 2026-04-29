@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/format"
 	"github.com/husibo16/yunzes-node/conf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
@@ -319,6 +320,9 @@ func buildTrojan(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreCo
 func buildShadowsocks(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "shadowsocks"
 	s := nodeInfo.Common.Shadowsocks
+	if err := format.ValidateShadowsocksCipher(s.Cipher, s.ServerKey); err != nil {
+		return err
+	}
 	settings := &coreConf.ShadowsocksServerConfig{
 		Cipher: s.Cipher,
 	}

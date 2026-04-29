@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/format"
 	"github.com/husibo16/yunzes-node/conf"
 	"github.com/sagernet/sing-box/option"
 	F "github.com/sagernet/sing/common/format"
@@ -253,25 +254,25 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 		}
 	case "shadowsocks":
 		in.Type = "shadowsocks"
-		var keyLength int
-		switch info.Common.Shadowsocks.Cipher {
-		case "2022-blake3-aes-128-gcm":
-			keyLength = 16
+		ss := info.Common.Shadowsocks
+		if err = format.ValidateShadowsocksCipher(ss.Cipher, ss.ServerKey); err != nil {
+			return option.Inbound{}, err
+		}
+		keyLength := 16
+		switch ss.Cipher {
 		case "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305":
 			keyLength = 32
-		default:
-			keyLength = 16
 		}
 		ssoption := &option.ShadowsocksInboundOptions{
 			ListenOptions: listen,
-			Method:        info.Common.Shadowsocks.Cipher,
+			Method:        ss.Cipher,
 			Multiplex:     multiplex,
 		}
 		p := make([]byte, keyLength)
 		_, _ = rand.Read(p)
 		randomPasswd := string(p)
-		if strings.Contains(info.Common.Shadowsocks.Cipher, "2022") {
-			ssoption.Password = info.Common.Shadowsocks.ServerKey
+		if strings.Contains(ss.Cipher, "2022") {
+			ssoption.Password = ss.ServerKey
 			randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
 		}
 		ssoption.Users = []option.ShadowsocksUser{{
