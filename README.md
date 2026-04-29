@@ -3,13 +3,111 @@
 A yunzes-node server based on multi core, modified from V2bX.  
 一个基于多种内核的 yunzes-node 节点服务端，修改自 V2bX，支持 V2ray、Trojan、Shadowsocks、Tuic、Hysteria 协议。
 
-## 软件安装
+## 一键安装与运维（推荐）
 
-### 一键安装
+`Scripts/yunzes-node.sh` 是完整运维入口，安装后可直接以 `yunzes-node` 命令调用。它默认走 **Docker + host network + 单容器双核心** 模式，并把 PreCheck（23 项）、备份、回滚、卸载、fake panel 4 协议自测都串在一起。
+
+```bash
+# 1. 拉源码 + 进入目录
+git clone https://github.com/husibo16/yunzes-node.git
+cd yunzes-node
+
+# 2. 安装命令入口（写到 /usr/bin/yunzes-node）
+sudo bash Scripts/yunzes-node.sh setup-entry
+
+# 3. 进入交互菜单
+sudo yunzes-node
+```
+
+也支持非交互子命令，每个菜单项都有对应的 CLI：
+
+```bash
+sudo yunzes-node install               # 装并启动
+sudo yunzes-node install --no-restart  # 装但不启 restart=always（用于先 verify）
+sudo yunzes-node verify                # 三级验证：基础 / 网络 / 业务
+sudo yunzes-node logs                  # 最近 100 行
+sudo yunzes-node follow-log            # 跟随日志
+sudo yunzes-node ports                 # ss 看 yunzes-node PID 的监听端口
+sudo yunzes-node check-panel           # curl 探活每个节点的 panel API
+sudo yunzes-node fake-test             # 起 fake panel + 4 协议自测
+sudo yunzes-node show-config           # 自动隐藏 ApiKey 显示
+sudo yunzes-node edit-config           # 自动备份再编辑，JSON 校验失败不重启
+sudo yunzes-node backup                # 一次完整备份（config + certs + 镜像 ID）
+sudo yunzes-node rollback              # 列出备份并选一个回滚
+sudo yunzes-node update                # build/pull 新镜像 + 自动 PostCheck，失败自动回滚
+sudo yunzes-node uninstall             # 删容器/镜像，保留配置和证书
+sudo yunzes-node uninstall-full        # 全清；要求二次输入 "DELETE YUNZES NODE"
+```
+
+完整命令清单：`yunzes-node help`。
+
+### 推荐生产端口方案
 
 ```
-wget -N https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/install.sh && bash install.sh
+443/tcp      → vless + reality
+8388/tcp+udp → shadowsocks       (脚本会自动同时登记 tcp+udp)
+8443/udp     → hysteria2
+9443/tcp     → trojan
 ```
+
+端口规则（脚本和 Go 端 portRegistry 都强制执行）：
+
+- 同 `transport` (tcp / udp) + 同 port → 冲突；
+- `0.0.0.0:p/T` 与具体 IPv4:p/T → 冲突（wildcard 覆盖具体）；
+- `::` 与 `0.0.0.0` 同 p+T → 冲突（dual-stack 不一致）；
+- `443/tcp` 与 `443/udp` → 不冲突，可共存（reality + hysteria2 同 443 的常见做法）；
+- shadowsocks 默认 tcp+udp 双登记，因此不能同端口再放 hysteria2。
+
+### fake panel 四协议自测
+
+`yunzes-node fake-test` 用于离线验证整套 C0~C5 行为，不需要真实 panel：
+
+- 启动一个 Python `127.0.0.1:9999` fake panel，返回 4 协议的 NodeInfo
+- 写入临时 4 协议测试配置（vless+tls / shadowsocks / hysteria2 / vless+reality）
+- 用 `--restart no` 起容器（避免崩了无限重启刷屏）
+- 检查日志无 `panic` / `nil pointer dereference` / `runtime error`
+- 检查日志含 `Core Selector` / `Adding node inbound` / `logical_tag` / `core=` / `runtime_key` / `protocol=` / `server_id` / `port=` 字段
+- 用 `ss -lntup` 校验 8101/tcp、8102/tcp、8102/udp、8103/udp、8104/tcp 五个监听都由 yunzes-node 占用
+- 重启容器后日志含 `cert_action=reuse`（证明 C3 持久化生效）
+
+跑完询问是否恢复原 config / 停 fake panel / 删测试容器 / 删测试证书。**默认不会动你已有的 ApiKey 和真实证书**，只在收尾时按你 y/N 选择处理。
+
+### 升级与回滚
+
+`yunzes-node update` 走如下流程：
+
+1. PreCheck（同安装）
+2. 备份当前 config.json / certs / `docker inspect` / 镜像 ID 到 `/opt/yunzes-node/backups/<timestamp>/`
+3. 重新 build（源码可用时）或 pull 镜像
+4. 删旧容器、起新容器
+5. PostCheck —— L1 失败立即触发**自动回滚**：
+   - 用旧镜像 ID 起回去
+   - 还原 config + certs
+   - 重跑一次 PostCheck
+
+升级失败不会出现"容器没了 / 配置丢了 / 证书丢了"的状态，最坏情况是版本仍在升级前。
+
+手动回滚到任一历史备份：`yunzes-node rollback`。
+
+### 卸载
+
+- `yunzes-node uninstall` — 删容器、可选删镜像、可选删 `/usr/bin/yunzes-node`，**保留** `/etc/yunzes-node` + 备份。
+- `yunzes-node uninstall-full` — 危险操作，要求输入 `DELETE YUNZES NODE` 二次确认，删除所有容器 + 镜像 + 配置 + 证书 + 备份 + 全局命令。
+
+### 常见问题排查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `permission denied while trying to connect to the docker API` | 当前用户不在 docker 组 | `sudo usermod -aG docker $USER`，重开终端；或直接用 root 跑脚本 |
+| `cert_action=error  invalid reality config: missing reality_private_key` | panel 下发 reality 配置缺 private key | 检查 panel 后台 reality 节点配置是否完整 |
+| 容器无限 `Restarting (0)` | dummy / 离线 panel 被配成 ApiHost 但 `--restart always` | 用 `yunzes-node fake-test` 替代手动 dummy；或临时 `redeploy --no-restart` |
+| `docker logs` 出现 panic | 已通过 C5 修复理论上消除；如再发生，立即 `yunzes-node backup` 留证据，提 issue 附 `docker logs` |
+| 升级后业务不通 | PostCheck 应已触发自动回滚；若没回滚，手动 `yunzes-node rollback` 选最近一个 |
+| 端口 443 既要 reality 又要 hysteria2 | 一个 tcp 一个 udp 可共存；脚本会接受 |
+
+### 进阶：直接 docker run 或 docker compose
+
+如果你不想用菜单脚本，仓库里有 `docker-compose.yml` 和 `Scripts/docker-run.sh` 两个轻量入口可直接用，行为与菜单脚本一致。
 
 ## 构建
 ``` bash
