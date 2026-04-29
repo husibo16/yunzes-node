@@ -41,6 +41,18 @@ sudo yunzes-node uninstall-full        # 全清；要求二次输入 "DELETE YUN
 
 完整命令清单：`yunzes-node help`。
 
+**国际化 (中文 / English)**
+
+默认中文。设 `YUNZES_LANG=en` 切英文，或脚本根据 `LANG` 自动判断（`LANG=en_US.UTF-8 → en`，其它 → zh）。
+
+```bash
+YUNZES_LANG=en sudo yunzes-node            # 全英文菜单
+YUNZES_LANG=zh sudo yunzes-node verify      # 强制中文（即便 LANG=en）
+LANG=en_US.UTF-8 sudo yunzes-node           # 自动英文
+```
+
+每条 print_* 输出都通过内联的 `_t "中文" "English"` 翻译；维护时双语版本紧贴在一起便于审核。
+
 **彩色输出与 NO_COLOR**
 
 脚本默认输出彩色（步骤青、信息蓝、成功绿、警告黄、错误红、危险红、命令紫）。日志采集 / CI / 重定向到文件场景下脚本自动检测 `! -t 1` 关闭颜色；想强制关闭也可以：
@@ -49,6 +61,29 @@ sudo yunzes-node uninstall-full        # 全清；要求二次输入 "DELETE YUN
 NO_COLOR=1 yunzes-node verify
 NO_COLOR=1 yunzes-node fake-test 2>&1 | tee fake-test.log
 ```
+
+**配置体检 validate-config**
+
+`yunzes-node validate-config`（或菜单 1 安装流程内自动调用）做语义校验：
+- 每个节点 `NodeID` 必须存在且不重复
+- 每个节点 `NodeType` 必须是支持列表里的协议
+- `CertConfig.CertMode` 在 `http/dns/file/self` 时 **CertDomain 必须非空**（否则 C3 EnsureCertificate 会拒绝并触发容器 restart 循环）
+- 未知 `CertMode` 报 warn，建议用 `none/file/self/http/dns`
+
+`gen_config_interactive` 在交互生成时也会强制 `CertDomain` / `ApiKey` / ACME `Email` 非空，从源头杜绝"按 Enter 跳过 → 容器死循环"。
+
+**panel API 预检 preflight_panel_check**
+
+`yunzes-node check-panel`（或安装流程内自动调用）在容器启动前 `curl` 每个节点的 `${ApiHost}/v1/server/config?protocol=...&server_id=...&secret_key=...`：
+- HTTP 200 → 节点能从 panel 拿到配置（OK）
+- 401 / 403 → ApiKey 错或权限不足（warn）
+- 404 → panel 路径或 NodeID 不对（**fail**，会询问是否继续）
+- 5xx → panel 内部错误（warn）
+- 000 → 不可达（**fail**）
+
+**verify_basic 检测 restart 循环**
+
+如果容器在最近 60 秒发生 ≥3 次 start 事件且 `RestartCount ≥ 3`，verify L1 直接报 FAIL "容器在重启循环"，避免用户看到瞬时 "Up" 而误以为正常。
 
 **自动安装依赖**
 

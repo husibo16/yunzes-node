@@ -8,21 +8,19 @@
 # fake-test`, ...).
 #
 # Default deployment is always Docker + host network + single container,
-# never split xray/sing-box into separate containers. The Go binary inside
-# the image already links both runtimes (C0-C5 refactor).
+# never split xray/sing-box into separate containers.
 #
-# Color output: every operator-facing message goes through one of the
-# print_* functions defined in the OUTPUT HELPERS section. Colors auto-
-# disable when stdout is not a TTY or NO_COLOR=1 is set.
+# Internationalization: every operator-visible string flows through `_t
+# "zh-text" "en-text"`. Locale auto-detects from $YUNZES_LANG or $LANG and
+# defaults to zh.
 #
-# This script is self-contained: depends on coreutils, bash 4+, docker,
-# jq, curl, tar, and python3 (only for fake-test). Source-tree-only
-# features (e.g. `docker build` from local Dockerfile) auto-detect.
+# Color output: all output flows through print_* helpers; colors auto-
+# disable on non-TTY stdout or when NO_COLOR=1 is set.
 
 set -uo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -41,6 +39,29 @@ readonly FAKE_PANEL_PID_FILE="/tmp/fake_panel.pid"
 readonly FAKE_PANEL_LOG_FILE="/tmp/fake_panel.log"
 readonly FAKE_PANEL_PORT=9999
 readonly FAKE_TEST_CONFIG="/tmp/yunzes-fake-config.json"
+
+# -----------------------------------------------------------------------------
+# Locale: $YUNZES_LANG wins; otherwise infer from LANG. Default zh.
+# -----------------------------------------------------------------------------
+if [[ -n "${YUNZES_LANG:-}" ]]; then
+    case "${YUNZES_LANG,,}" in
+        zh*) LOCALE=zh ;;
+        en*) LOCALE=en ;;
+        *)   LOCALE=zh ;;
+    esac
+elif [[ "${LANG:-}" =~ ^en ]]; then
+    LOCALE=en
+else
+    LOCALE=zh
+fi
+readonly LOCALE
+
+# _t "zh-text" "en-text" — emit the text matching $LOCALE, no trailing
+# newline. Both arguments are required so a maintainer always sees both
+# translations side-by-side at the call site.
+_t() {
+    if [[ "$LOCALE" == "zh" ]]; then printf '%s' "$1"; else printf '%s' "${2:-$1}"; fi
+}
 
 # -----------------------------------------------------------------------------
 # Color initialization. NO_COLOR=1 or non-TTY stdout disables colors so logs
@@ -63,35 +84,23 @@ if [[ -t 1 && "${NO_COLOR:-0}" != "1" ]]; then
     readonly C_PLAIN=$'\033[0m'
 else
     readonly COLOR_ENABLED=0
-    readonly C_RED=""        C_GREEN=""       C_YELLOW=""      C_BLUE=""
-    readonly C_MAGENTA=""    C_CYAN=""        C_GRAY=""
-    readonly C_BOLD=""       C_BOLD_CYAN=""   C_BOLD_RED=""    C_BOLD_YELLOW=""
-    readonly C_DIM=""        C_PLAIN=""
+    readonly C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA=""
+    readonly C_CYAN="" C_GRAY="" C_BOLD="" C_BOLD_CYAN="" C_BOLD_RED=""
+    readonly C_BOLD_YELLOW="" C_DIM="" C_PLAIN=""
 fi
 
-# Per-precheck status counters; precheck functions tally into these.
 PRECHECK_PASS=0
 PRECHECK_WARN=0
 PRECHECK_FAIL=0
-
-# Subcommand-level flags. Reset by parse_flags().
 NO_RESTART=0
 RESTART_POLICY="always"
 
-# Detected at boot.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 SOURCE_DIR=""
 
 # -----------------------------------------------------------------------------
-# OUTPUT HELPERS
-#
-# Every operator-facing line that is not raw command output (docker logs,
-# JSON dump, ...) MUST go through one of these. Direct echo / printf is
-# reserved for:
-#   - blank lines
-#   - structured data being piped to / from another tool
-#   - inline read prompts (which use printf with explicit color codes)
+# OUTPUT HELPERS — every operator-facing line flows through one of these.
 # -----------------------------------------------------------------------------
 print_step()    { printf "%b[STEP]%b %s\n" "${C_CYAN}"    "${C_PLAIN}" "$*"; }
 print_info()    { printf "%b[INFO]%b %s\n" "${C_BLUE}"    "${C_PLAIN}" "$*"; }
@@ -105,7 +114,6 @@ print_cmd()     { printf "%b[CMD ]%b %s\n" "${C_MAGENTA}" "${C_PLAIN}" "$*"; }
 print_danger()  { printf "%b[!!!!]%b %s\n" "${C_BOLD_RED}" "${C_PLAIN}" "$*" >&2; }
 print_title()   { printf "%b%s%b\n" "${C_BOLD_CYAN}" "$*" "${C_PLAIN}"; }
 print_kv()      {
-    # print_kv "label" "value" — label cyan, value blue
     printf "  %b%s%b: %b%s%b\n" "${C_CYAN}" "$1" "${C_PLAIN}" "${C_BLUE}" "$2" "${C_PLAIN}"
 }
 print_separator() {
@@ -121,11 +129,9 @@ print_menu_item() {
     esac
 }
 print_choice() {
-    # print_choice "NN)" "description" — coloured choice prompt
     printf "  %b%s%b %b%s%b\n" "${C_GREEN}" "$1" "${C_PLAIN}" "${C_CYAN}" "$2" "${C_PLAIN}"
 }
 
-# Backwards-compatible shorter aliases used throughout the rest of the script.
 info()    { print_info    "$@"; }
 ok()      { print_success "$@"; }
 warn()    { print_warn    "$@"; }
@@ -133,11 +139,11 @@ fail()    { print_error   "$@"; }
 step()    { print_step    "$@"; }
 fix_hint(){ print_fix     "$@"; }
 
-# -----------------------------------------------------------------------------
-# Interactive helpers
-# -----------------------------------------------------------------------------
 err_exit() { fail "$*"; exit 1; }
 
+# -----------------------------------------------------------------------------
+# Interactive helpers — colored prompts, all bilingual.
+# -----------------------------------------------------------------------------
 prompt_read() {
     # prompt_read "question" "default" → echos answer to stdout
     local q="$1" def="${2:-}" reply
@@ -148,6 +154,21 @@ prompt_read() {
     fi
     read -r reply || true
     echo "${reply:-$def}"
+}
+
+prompt_required() {
+    # prompt_required "question" "error-msg-zh" "error-msg-en"
+    # Loops until the user enters a non-empty value.
+    local q="$1" err_zh="$2" err_en="$3" reply
+    while true; do
+        printf "%b? %s: %b" "${C_CYAN}" "$q" "${C_PLAIN}" >&2
+        read -r reply || true
+        if [[ -n "$reply" ]]; then
+            echo "$reply"
+            return 0
+        fi
+        print_warn "$(_t "$err_zh" "$err_en")"
+    done
 }
 
 confirm() {
@@ -178,22 +199,15 @@ mask_api_key() {
 # -----------------------------------------------------------------------------
 is_root() { [[ $EUID -eq 0 ]]; }
 
-# detect_os echoes one of: debian, ubuntu, other
-#
-# Does NOT `source /etc/os-release` because some distributions mark fields
-# (NAME, VERSION) as readonly and sourcing into a sub-shell that already
-# has a readonly NAME aborts with "readonly variable: NAME". grep|cut is
-# safe regardless.
+# detect_os: grep+cut /etc/os-release. Sourcing was unsafe because some
+# distros mark $NAME / $VERSION readonly, which abort the shell on `source`.
 detect_os() {
     local id id_like
     id=$(grep -E '^ID=' /etc/os-release 2>/dev/null \
             | head -1 | cut -d= -f2- | tr -d '"' || true)
     id_like=$(grep -E '^ID_LIKE=' /etc/os-release 2>/dev/null \
             | head -1 | cut -d= -f2- | tr -d '"' || true)
-    case "$id" in
-        debian) echo debian; return ;;
-        ubuntu) echo ubuntu; return ;;
-    esac
+    case "$id" in debian) echo debian; return ;; ubuntu) echo ubuntu; return ;; esac
     case "$id_like" in
         *debian*) echo debian; return ;;
         *ubuntu*) echo ubuntu; return ;;
@@ -203,14 +217,13 @@ detect_os() {
 
 detect_arch() {
     case "$(uname -m)" in
-        x86_64|amd64) echo amd64 ;;
-        aarch64|arm64) echo arm64 ;;
-        *) echo "$(uname -m)" ;;
+        x86_64|amd64)   echo amd64 ;;
+        aarch64|arm64)  echo arm64 ;;
+        *)              echo "$(uname -m)" ;;
     esac
 }
 
 detect_source_dir() {
-    # Echos the source dir if running from a checkout; empty otherwise.
     local d="$SCRIPT_DIR"
     for _ in 1 2; do
         if [[ -f "$d/Dockerfile" && -f "$d/go.mod" ]]; then
@@ -222,10 +235,7 @@ detect_source_dir() {
 }
 
 # detect_docker_state returns:
-#   0  — docker reachable
-#   10 — not installed
-#   11 — daemon down
-#   12 — current user has no socket permission
+#   0 ok / 10 not installed / 11 daemon down / 12 no socket permission
 detect_docker_state() {
     if ! command -v docker >/dev/null 2>&1; then return 10; fi
     local out rc
@@ -241,9 +251,6 @@ container_running() { docker ps    --format '{{.Names}}' 2>/dev/null | grep -Fxq
 current_image_id()  { docker inspect --format '{{.Image}}'        "$NAME" 2>/dev/null || true; }
 current_image_name(){ docker inspect --format '{{.Config.Image}}' "$NAME" 2>/dev/null || true; }
 
-# -----------------------------------------------------------------------------
-# Flag parsing — strips --no-restart from $@.
-# -----------------------------------------------------------------------------
 FLAGS_REST=()
 parse_flags() {
     NO_RESTART=0
@@ -272,44 +279,46 @@ print_banner() {
 
 BANNER
     printf "%b" "${C_PLAIN}"
-    print_kv "version"    "v${SCRIPT_VERSION}"
-    print_kv "image"      "${DEFAULT_IMAGE}"
-    print_kv "config dir" "${CONFIG_DIR}"
-    print_kv "run dir"    "${RUN_DIR}"
+    print_kv "$(_t "版本"     "version")"     "v${SCRIPT_VERSION}"
+    print_kv "$(_t "镜像"     "image")"       "${DEFAULT_IMAGE}"
+    print_kv "$(_t "配置目录" "config dir")"  "${CONFIG_DIR}"
+    print_kv "$(_t "运行目录" "run dir")"     "${RUN_DIR}"
+    print_kv "$(_t "语言"     "locale")"      "${LOCALE} ($(_t '中文' 'English'))"
     if [[ "$COLOR_ENABLED" == "0" ]]; then
-        print_info "颜色已禁用 (NO_COLOR=1 或非交互式 stdout)"
+        print_info "$(_t "颜色已禁用（NO_COLOR=1 或非交互式 stdout）" \
+                        "Color disabled (NO_COLOR=1 or non-TTY stdout)")"
     fi
 }
 
 print_menu() {
     echo
-    print_title  "管理菜单"
+    print_title  "$(_t '管理菜单' 'Management Menu')"
     print_separator
-    print_menu_item  1 "安装 yunzes-node"
-    print_menu_item  2 "升级 yunzes-node"
-    print_menu_item  3 "启动 yunzes-node"
-    print_menu_item  4 "停止 yunzes-node"
-    print_menu_item  5 "重启 yunzes-node"
-    print_menu_item  6 "重新部署容器"
-    print_menu_item  7 "查看运行状态"
-    print_menu_item  8 "查看实时日志"
-    print_menu_item  9 "查看最近日志"
-    print_menu_item 10 "验证节点服务"
-    print_menu_item 11 "编辑配置文件"
-    print_menu_item 12 "查看当前配置 (隐藏 ApiKey)"
-    print_menu_item 13 "生成配置模板"
-    print_menu_item 14 "测试连接 panel server"
-    print_menu_item 15 "查看监听端口"
-    print_menu_item 16 "查看 Docker 容器信息"
-    print_menu_item 17 "备份当前配置"
-    print_menu_item 18 "回滚到上一个备份"
-    print_menu_item 19 "清理旧镜像"                   danger
-    print_menu_item 20 "运行 fake panel 四协议验证"
-    print_menu_item 21 "停止 fake panel"
-    print_menu_item 22 "卸载程序，保留配置和证书"     danger
-    print_menu_item 23 "完全卸载（删除配置 + 证书）"   danger
-    print_menu_item 24 "安装/更新命令入口 ${INSTALLED_PATH}"
-    print_menu_item 25 "退出"                         exit
+    print_menu_item  1 "$(_t '安装 yunzes-node'                      'Install yunzes-node')"
+    print_menu_item  2 "$(_t '升级 yunzes-node'                      'Upgrade yunzes-node')"
+    print_menu_item  3 "$(_t '启动 yunzes-node'                      'Start yunzes-node')"
+    print_menu_item  4 "$(_t '停止 yunzes-node'                      'Stop yunzes-node')"
+    print_menu_item  5 "$(_t '重启 yunzes-node'                      'Restart yunzes-node')"
+    print_menu_item  6 "$(_t '重新部署容器'                          'Redeploy container')"
+    print_menu_item  7 "$(_t '查看运行状态'                          'Show status')"
+    print_menu_item  8 "$(_t '查看实时日志'                          'Follow logs')"
+    print_menu_item  9 "$(_t '查看最近日志'                          'Show recent logs')"
+    print_menu_item 10 "$(_t '验证节点服务'                          'Verify node service')"
+    print_menu_item 11 "$(_t '编辑配置文件'                          'Edit config')"
+    print_menu_item 12 "$(_t '查看当前配置 (隐藏 ApiKey)'            'Show config (ApiKey masked)')"
+    print_menu_item 13 "$(_t '生成配置模板'                          'Generate config template')"
+    print_menu_item 14 "$(_t '测试连接 panel server'                 'Test panel API reachability')"
+    print_menu_item 15 "$(_t '查看监听端口'                          'Show listening ports')"
+    print_menu_item 16 "$(_t '查看 Docker 容器信息'                  'Show Docker container info')"
+    print_menu_item 17 "$(_t '备份当前配置'                          'Backup current config')"
+    print_menu_item 18 "$(_t '回滚到上一个备份'                      'Rollback to a backup')"
+    print_menu_item 19 "$(_t '清理旧镜像'                            'Cleanup old images')"   danger
+    print_menu_item 20 "$(_t '运行 fake panel 四协议验证'            'Run fake-panel 4-protocol test')"
+    print_menu_item 21 "$(_t '停止 fake panel'                       'Stop fake panel')"
+    print_menu_item 22 "$(_t '卸载程序，保留配置和证书'              'Uninstall (keep config + certs)')"      danger
+    print_menu_item 23 "$(_t '完全卸载（删除配置 + 证书）'           'Uninstall FULL (wipe everything)')"     danger
+    print_menu_item 24 "$(_t "安装/更新命令入口 ${INSTALLED_PATH}"   "Install/update command entry ${INSTALLED_PATH}")"
+    print_menu_item 25 "$(_t '退出' 'Exit')"   exit
     print_separator
 }
 
@@ -319,7 +328,7 @@ cmd_menu() {
         print_banner
         print_menu
         local choice
-        printf "%b请选择 [1-25]: %b" "${C_CYAN}" "${C_PLAIN}"
+        printf "%b%s%b" "${C_CYAN}" "$(_t '请选择 [1-25]: ' 'Select [1-25]: ')" "${C_PLAIN}"
         read -r choice || break
         echo
         case "$choice" in
@@ -347,88 +356,76 @@ cmd_menu() {
             22) cmd_uninstall ;;
             23) cmd_uninstall_full ;;
             24) cmd_setup_entry ;;
-            25|q|Q|exit) print_info "再见。"; return 0 ;;
-            *)  print_warn "无效选项：$choice" ;;
+            25|q|Q|exit) print_info "$(_t '再见。' 'Goodbye.')"; return 0 ;;
+            *)  print_warn "$(_t "无效选项：$choice" "Invalid option: $choice")" ;;
         esac
         echo
-        printf "%b按回车返回菜单...%b" "${C_DIM}" "${C_PLAIN}"
+        printf "%b%s%b" "${C_DIM}" "$(_t '按回车返回菜单...' 'Press Enter to return to menu...')" "${C_PLAIN}"
         read -r _ || true
     done
 }
 
 # -----------------------------------------------------------------------------
-# PreCheck split into basic / dependency / docker / file phases. cmd_install
-# calls them in order; `yunzes-node precheck` runs the whole pipeline.
+# PreCheck phases
 # -----------------------------------------------------------------------------
 _pcok()   { print_success "$1"; PRECHECK_PASS=$((PRECHECK_PASS+1)); }
 _pcwarn() { print_warn    "$1"; PRECHECK_WARN=$((PRECHECK_WARN+1)); }
 _pcfail() { print_error   "$1"; PRECHECK_FAIL=$((PRECHECK_FAIL+1)); }
-
-reset_precheck_counters() {
-    PRECHECK_PASS=0; PRECHECK_WARN=0; PRECHECK_FAIL=0
-}
+reset_precheck_counters() { PRECHECK_PASS=0; PRECHECK_WARN=0; PRECHECK_FAIL=0; }
 
 basic_precheck() {
-    print_step "PreCheck: 基础环境"
+    print_step "$(_t 'PreCheck: 基础环境' 'PreCheck: basic environment')"
     if is_root; then
-        _pcok "运行用户：root"
+        _pcok "$(_t '运行用户：root' 'Running as: root')"
     else
-        _pcfail "必须使用 root 运行（当前 UID=$EUID）"
-        print_fix "改用：sudo $SCRIPT_PATH ${1:-menu}"
+        _pcfail "$(_t "必须使用 root 运行（当前 UID=$EUID）" "Must run as root (current UID=$EUID)")"
+        print_fix "$(_t "改用：sudo $SCRIPT_PATH ${1:-menu}" "Try: sudo $SCRIPT_PATH ${1:-menu}")"
     fi
     local os arch
     os=$(detect_os)
     case "$os" in
-        debian|ubuntu) _pcok "操作系统：$os" ;;
-        *)             _pcwarn "未在 Debian / Ubuntu 上测试（detected: $os），脚本可能仍能运行" ;;
+        debian|ubuntu) _pcok "$(_t "操作系统：$os" "OS: $os")" ;;
+        *)             _pcwarn "$(_t "未在 Debian / Ubuntu 上测试（detected: $os）" "Untested on $os (Debian/Ubuntu recommended)")" ;;
     esac
     arch=$(detect_arch)
     case "$arch" in
-        amd64|arm64) _pcok "CPU 架构：$arch" ;;
-        *)           _pcwarn "未测试的 CPU 架构：$arch（amd64 / arm64 之外的平台风险自担）" ;;
+        amd64|arm64) _pcok "$(_t "CPU 架构：$arch" "Arch: $arch")" ;;
+        *)           _pcwarn "$(_t "未测试的 CPU 架构：$arch" "Untested CPU arch: $arch")" ;;
     esac
     if command -v free >/dev/null 2>&1; then
         local mem_free
         mem_free=$(free -h --si 2>/dev/null | awk '/^Mem:/{print $7}')
-        [[ -n "$mem_free" ]] && _pcok "可用内存：$mem_free"
+        [[ -n "$mem_free" ]] && _pcok "$(_t "可用内存：$mem_free" "Free memory: $mem_free")"
     fi
     local disk_free
     disk_free=$(df -h / 2>/dev/null | awk 'NR==2{print $4}')
-    [[ -n "$disk_free" ]] && _pcok "/ 可用磁盘：$disk_free"
+    [[ -n "$disk_free" ]] && _pcok "$(_t "/ 可用磁盘：$disk_free" "/ free disk: $disk_free")"
 }
 
 DEPENDENCIES=(curl jq tar git ss python3)
 DEP_PACKAGES=(curl jq tar git iproute2 python3)
 
 dependency_precheck() {
-    print_step "PreCheck: CLI 依赖"
-    local tool missing=0
+    print_step "$(_t 'PreCheck: CLI 依赖' 'PreCheck: CLI dependencies')"
+    local tool
     for tool in "${DEPENDENCIES[@]}"; do
         if command -v "$tool" >/dev/null 2>&1; then
-            _pcok "命令存在：$tool"
+            _pcok "$(_t "命令存在：$tool" "command available: $tool")"
         else
-            _pcwarn "缺少 $tool（ensure_dependencies 阶段会询问安装）"
-            missing=$((missing+1))
+            _pcwarn "$(_t "缺少 $tool（ensure_dependencies 阶段会询问安装）" "missing $tool (ensure_dependencies will offer to install)")"
         fi
     done
-    return 0
 }
 
 ensure_dependencies() {
-    # Returns 0 if all deps present (or successfully installed), 1 if user
-    # declined or install failed. Also installs docker.io when missing and
-    # starts the daemon. Debian / Ubuntu only; on other distros we just
-    # warn and let docker_precheck do the hard fail.
     local os
     os=$(detect_os)
     if [[ "$os" != "debian" && "$os" != "ubuntu" ]]; then
-        print_warn "非 Debian/Ubuntu 系统，跳过自动安装；请手动确保依赖已就绪"
+        print_warn "$(_t '非 Debian/Ubuntu 系统，跳过自动安装；请手动确保依赖已就绪' 'Not Debian/Ubuntu — skipping auto-install; ensure deps manually')"
         return 0
     fi
-
-    print_step "ensure_dependencies: 检查并安装必需依赖"
-    local missing=()
-    local i
+    print_step "$(_t 'ensure_dependencies: 检查并安装必需依赖' 'ensure_dependencies: checking and installing required deps')"
+    local missing=() i
     for i in "${!DEPENDENCIES[@]}"; do
         local tool="${DEPENDENCIES[$i]}"
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -440,32 +437,31 @@ ensure_dependencies() {
     fi
 
     if (( ${#missing[@]} == 0 )); then
-        print_ok "所有依赖已就绪"
+        print_ok "$(_t '所有依赖已就绪' 'All dependencies present')"
     else
-        print_info "缺失依赖: ${missing[*]}"
-        if confirm "执行 apt update && apt install -y ${missing[*]}" y; then
+        print_info "$(_t "缺失依赖: ${missing[*]}" "Missing deps: ${missing[*]}")"
+        if confirm "$(_t "执行 apt update && apt install -y ${missing[*]}" "Run apt update && apt install -y ${missing[*]}")" y; then
             print_cmd "apt-get update -y"
             DEBIAN_FRONTEND=noninteractive apt-get update -y || {
-                print_fail "apt update 失败 — 请检查网络或 /etc/apt/sources.list"
+                print_fail "$(_t 'apt update 失败 — 请检查网络或 /etc/apt/sources.list' 'apt update failed — check network or /etc/apt/sources.list')"
                 return 1
             }
             print_cmd "apt-get install -y ${missing[*]}"
             DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" || {
-                print_fail "apt install 失败 — 请手动 apt install -y ${missing[*]} 后重试"
+                print_fail "$(_t "apt install 失败 — 请手动 apt install -y ${missing[*]} 后重试" "apt install failed — run apt install -y ${missing[*]} manually then retry")"
                 return 1
             }
-            print_ok "依赖安装完成"
+            print_ok "$(_t '依赖安装完成' 'Dependencies installed')"
         else
-            print_warn "用户取消自动安装；请手动安装后重试"
-            print_fix "apt update && apt install -y ${missing[*]}"
+            print_warn "$(_t '用户取消自动安装；请手动安装后重试' 'User declined auto-install; install manually then retry')"
+            print_fix  "apt update && apt install -y ${missing[*]}"
             return 1
         fi
     fi
 
-    # Make sure dockerd is running.
     if command -v docker >/dev/null 2>&1; then
         if ! docker info >/dev/null 2>&1; then
-            print_step "尝试启动 Docker daemon"
+            print_step "$(_t '尝试启动 Docker daemon' 'Starting Docker daemon')"
             if command -v systemctl >/dev/null 2>&1; then
                 print_cmd "systemctl start docker"
                 systemctl start docker 2>/dev/null || true
@@ -476,9 +472,9 @@ ensure_dependencies() {
             fi
             sleep 2
             if docker info >/dev/null 2>&1; then
-                print_ok "Docker daemon 已启动"
+                print_ok "$(_t 'Docker daemon 已启动' 'Docker daemon started')"
             else
-                print_warn "Docker daemon 启动失败（可能需要手动 service docker start）"
+                print_warn "$(_t 'Docker daemon 启动失败（可能需要手动 service docker start）' 'Docker daemon failed to start — try service docker start manually')"
             fi
         fi
     fi
@@ -486,64 +482,54 @@ ensure_dependencies() {
 }
 
 docker_precheck() {
-    print_step "PreCheck: Docker"
+    print_step "$(_t 'PreCheck: Docker' 'PreCheck: Docker')"
     detect_docker_state
     case $? in
-        0)
-            _pcok "Docker 可用且当前用户能调用 docker ps"
-            ;;
-        10)
-            _pcfail "Docker 未安装"
-            print_fix "Debian/Ubuntu 安装：apt update && apt install -y docker.io"
-            ;;
-        11)
-            _pcfail "Docker daemon 未运行"
-            print_fix "启动 daemon：service docker start  或  systemctl start docker"
-            ;;
-        12)
-            _pcfail "当前用户无 /var/run/docker.sock 权限"
-            print_fix "永久路：usermod -aG docker \$USER  然后重新登录终端"
-            print_fix "临时路：用 sudo 重跑此脚本，或切到 root"
-            ;;
+        0)  _pcok   "$(_t 'Docker 可用且当前用户能调用 docker ps' 'Docker reachable; current user can run docker ps')" ;;
+        10) _pcfail "$(_t 'Docker 未安装' 'Docker not installed')"
+            print_fix "$(_t 'Debian/Ubuntu 安装：apt update && apt install -y docker.io' 'Debian/Ubuntu install: apt update && apt install -y docker.io')" ;;
+        11) _pcfail "$(_t 'Docker daemon 未运行' 'Docker daemon not running')"
+            print_fix "$(_t '启动 daemon：service docker start  或  systemctl start docker' 'Start daemon: service docker start  OR  systemctl start docker')" ;;
+        12) _pcfail "$(_t '当前用户无 /var/run/docker.sock 权限' 'Current user lacks /var/run/docker.sock permission')"
+            print_fix "$(_t '永久路：usermod -aG docker $USER  然后重新登录终端' 'Permanent: usermod -aG docker $USER  then re-login')"
+            print_fix "$(_t '临时路：用 sudo 重跑此脚本，或切到 root' 'Quick: rerun with sudo, or switch to root')" ;;
     esac
     if docker compose version >/dev/null 2>&1; then
-        _pcok "docker compose 可用 (v2 plugin)"
+        _pcok "$(_t 'docker compose 可用 (v2 plugin)' 'docker compose available (v2 plugin)')"
     elif command -v docker-compose >/dev/null 2>&1; then
-        _pcok "docker-compose 可用 (v1 binary)"
+        _pcok "$(_t 'docker-compose 可用 (v1 binary)' 'docker-compose available (v1 binary)')"
     else
-        _pcwarn "未发现 docker compose（不影响一键脚本，docker run 直跑即可）"
+        _pcwarn "$(_t '未发现 docker compose（不影响一键脚本，docker run 直跑即可）' 'docker compose not found (script does not need it)')"
     fi
     if container_exists; then
-        _pcok "已有容器 $NAME（升级 / 重新部署可继续）"
+        _pcok "$(_t "已有容器 $NAME（升级 / 重新部署可继续）" "Container $NAME already exists (update / redeploy can proceed)")"
     else
-        _pcwarn "尚无容器 $NAME（首次安装）"
+        _pcwarn "$(_t "尚无容器 $NAME（首次安装）" "No $NAME container yet (first install)")"
     fi
     if docker image inspect "$DEFAULT_IMAGE" >/dev/null 2>&1; then
-        _pcok "已有镜像 $DEFAULT_IMAGE"
+        _pcok "$(_t "已有镜像 $DEFAULT_IMAGE" "Image $DEFAULT_IMAGE present")"
     else
-        _pcwarn "镜像 $DEFAULT_IMAGE 不存在（安装流程会引导构建或拉取）"
+        _pcwarn "$(_t "镜像 $DEFAULT_IMAGE 不存在（安装流程会引导构建或拉取）" "Image $DEFAULT_IMAGE not present (install flow will build or pull)")"
     fi
 }
 
 file_precheck() {
-    print_step "PreCheck: 文件与目录"
+    print_step "$(_t 'PreCheck: 文件与目录' 'PreCheck: files and directories')"
     local d
     for d in "$CONFIG_DIR" "$CERTS_DIR" "$BACKUP_DIR"; do
-        if [[ -d "$d" ]]; then
-            _pcok "目录存在：$d"
-        else
-            _pcwarn "目录不存在：$d（安装流程会自动创建）"
+        if [[ -d "$d" ]]; then _pcok "$(_t "目录存在：$d" "Directory exists: $d")"
+        else _pcwarn "$(_t "目录不存在：$d（安装流程会自动创建）" "Directory missing: $d (install flow will create)")"
         fi
     done
     if [[ -f "$CONFIG_FILE" ]]; then
         if jq empty "$CONFIG_FILE" 2>/dev/null; then
-            _pcok "config.json 存在且 JSON 合法"
+            _pcok "$(_t 'config.json 存在且 JSON 合法' 'config.json present and valid JSON')"
         else
-            _pcfail "config.json 存在但非合法 JSON：$CONFIG_FILE"
-            print_fix "用菜单 11 / yunzes-node edit-config 修复"
+            _pcfail "$(_t "config.json 存在但非合法 JSON：$CONFIG_FILE" "config.json present but not valid JSON: $CONFIG_FILE")"
+            print_fix "$(_t '用菜单 11 / yunzes-node edit-config 修复' 'Use menu 11 / yunzes-node edit-config to fix')"
         fi
     else
-        _pcwarn "config.json 不存在：$CONFIG_FILE（安装流程会引导生成）"
+        _pcwarn "$(_t "config.json 不存在：$CONFIG_FILE（安装流程会引导生成）" "config.json missing: $CONFIG_FILE (install flow will create)")"
     fi
     _check_port_free 80  tcp || true
     _check_port_free 443 tcp || true
@@ -554,10 +540,7 @@ file_precheck() {
         while IFS= read -r spec; do
             [[ -z "$spec" ]] && continue
             IFS=':/' read -r addr port proto <<<"$spec"
-            # Local config doesn't carry per-protocol port (panel-driven);
-            # placeholder "?" must NEVER reach _check_port_free.
-            [[ "$port" == "?" ]] && continue
-            [[ -z "$port" || -z "$proto" ]] && continue
+            [[ "$port" == "?" || -z "$port" || -z "$proto" ]] && continue
             _check_port_free "$port" "$proto" || true
         done < "$tmp"
         rm -f "$tmp"
@@ -565,9 +548,9 @@ file_precheck() {
     if command -v ufw >/dev/null 2>&1; then
         local ufw_state
         ufw_state="$(ufw status 2>/dev/null | head -1 || true)"
-        _pcwarn "检测到 ufw（$ufw_state）；请确保业务端口已放行，本脚本不主动改动防火墙"
+        _pcwarn "$(_t "检测到 ufw（$ufw_state）；请确保业务端口已放行" "ufw detected ($ufw_state); ensure business ports are allowed")"
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        _pcwarn "检测到 firewalld；请确保业务端口已放行，本脚本不主动改动防火墙"
+        _pcwarn "$(_t '检测到 firewalld；请确保业务端口已放行' 'firewalld detected; ensure business ports are allowed')"
     fi
 }
 
@@ -578,19 +561,18 @@ precheck() {
     docker_precheck
     file_precheck
     echo
-    print_info "PreCheck 汇总:"
+    print_info "$(_t 'PreCheck 汇总:' 'PreCheck summary:')"
     printf "  %bPASS%b: %b%d%b\n" "${C_GREEN}"  "${C_PLAIN}" "${C_GREEN}"  "$PRECHECK_PASS" "${C_PLAIN}"
     printf "  %bWARN%b: %b%d%b\n" "${C_YELLOW}" "${C_PLAIN}" "${C_YELLOW}" "$PRECHECK_WARN" "${C_PLAIN}"
     printf "  %bFAIL%b: %b%d%b\n" "${C_RED}"    "${C_PLAIN}" "${C_RED}"    "$PRECHECK_FAIL" "${C_PLAIN}"
     if (( PRECHECK_FAIL > 0 )); then
-        print_fail "PreCheck 不通过，安装/升级流程中断。修完上面的 [FAIL] 项再重试。"
+        print_fail "$(_t 'PreCheck 不通过，安装/升级流程中断。修完上面的 [FAIL] 项再重试。' 'PreCheck failed. Fix [FAIL] items above then retry.')"
         return 1
     fi
     return 0
 }
 
 _check_port_free() {
-    # _check_port_free PORT TRANSPORT
     local port="$1" proto="$2"
     [[ "$port" == "?" || -z "$port" ]] && return 0
     if ! command -v ss >/dev/null 2>&1; then return 0; fi
@@ -600,20 +582,17 @@ _check_port_free() {
         udp) hits=$(ss -lnup 2>/dev/null | awk -v p=":$port" '$4 ~ p"$"' || true) ;;
         *)   return 0 ;;
     esac
-    if [[ -z "$hits" ]]; then return 0; fi
+    [[ -z "$hits" ]] && return 0
     owner=$(echo "$hits" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
     if [[ "$owner" == "$NAME" ]]; then
-        _pcok "$port/$proto 已由 yunzes-node 自身监听（属正常）"
+        _pcok "$(_t "$port/$proto 已由 yunzes-node 自身监听（属正常）" "$port/$proto already owned by yunzes-node (expected)")"
     else
-        _pcwarn "$port/$proto 已被 ${owner:-未知进程} 占用；ACME / 节点端口可能冲突"
+        _pcwarn "$(_t "$port/$proto 已被 ${owner:-未知进程} 占用；ACME / 节点端口可能冲突" "$port/$proto held by ${owner:-unknown}; may conflict with ACME / node port")"
     fi
 }
 
 # -----------------------------------------------------------------------------
-# Config helpers — list listen specs, etc.
-# Output of list_config_listen_specs: one "addr:?/proto" per line.
-# Port placeholder "?" is intentional because local config doesn't carry the
-# panel-driven port; real port-listen verification reads docker logs instead.
+# Config helpers
 # -----------------------------------------------------------------------------
 list_config_listen_specs() {
     [[ -f "$CONFIG_FILE" ]] || return 0
@@ -634,6 +613,140 @@ list_config_listen_specs() {
     done
 }
 
+# validate_config returns 0 iff every Node passes the cert / id / type checks.
+# This catches the "user pressed Enter on CertDomain" footgun BEFORE the
+# container restart loop kicks in.
+validate_config() {
+    [[ -f "$CONFIG_FILE" ]] || { print_fail "$(_t "$CONFIG_FILE 不存在" "$CONFIG_FILE missing")"; return 1; }
+    if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        print_fail "$(_t 'config.json 非合法 JSON' 'config.json not valid JSON')"
+        return 1
+    fi
+    print_step "$(_t '配置体检 (validate_config)' 'Config sanity check (validate_config)')"
+    local errors=0 warns=0 total
+    total=$(jq '.Nodes | length // 0' "$CONFIG_FILE")
+    if (( total == 0 )); then
+        print_fail "$(_t '配置中没有任何节点 (.Nodes 为空)' 'No nodes defined (.Nodes is empty)')"
+        return 1
+    fi
+    local seen_ids=()
+    local idx node_id node_type cert_mode cert_domain
+    for ((idx=0; idx<total; idx++)); do
+        node_id=$(jq -r   ".Nodes[$idx].NodeID  // empty" "$CONFIG_FILE")
+        node_type=$(jq -r ".Nodes[$idx].NodeType // empty" "$CONFIG_FILE")
+        cert_mode=$(jq -r ".Nodes[$idx].CertConfig.CertMode // .Nodes[$idx].Options.CertConfig.CertMode // \"none\"" "$CONFIG_FILE")
+        cert_domain=$(jq -r ".Nodes[$idx].CertConfig.CertDomain // .Nodes[$idx].Options.CertConfig.CertDomain // \"\"" "$CONFIG_FILE")
+
+        if [[ -z "$node_type" ]]; then
+            print_fail "$(_t "节点 #$idx: NodeType 缺失" "Node #$idx: NodeType missing")"
+            errors=$((errors+1))
+        else
+            case "$node_type" in
+                vless|vmess|trojan|shadowsocks|hysteria|hysteria2|tuic|anytls) ;;
+                *) print_fail "$(_t "节点 #$idx: 未知 NodeType '$node_type'" "Node #$idx: unknown NodeType '$node_type'")"; errors=$((errors+1)) ;;
+            esac
+        fi
+
+        if [[ -z "$node_id" || "$node_id" == "null" ]]; then
+            print_fail "$(_t "节点 #$idx: NodeID 缺失" "Node #$idx: NodeID missing")"
+            errors=$((errors+1))
+        else
+            local seen
+            for seen in "${seen_ids[@]:-}"; do
+                if [[ "$seen" == "$node_id" ]]; then
+                    print_fail "$(_t "节点 #$idx: NodeID=$node_id 重复（同一容器不能有两个相同 NodeID）" "Node #$idx: duplicate NodeID=$node_id (forbidden in one container)")"
+                    errors=$((errors+1))
+                fi
+            done
+            seen_ids+=("$node_id")
+        fi
+
+        case "$cert_mode" in
+            none|"") ;;
+            file|self|http|dns)
+                if [[ -z "$cert_domain" || "$cert_domain" == "null" ]]; then
+                    print_fail "$(_t "节点 #$idx ($node_type, CertMode=$cert_mode): CertDomain 不能为空 — yunzes-node 的 EnsureCertificate 会拒绝并触发容器重启循环" \
+                                    "Node #$idx ($node_type, CertMode=$cert_mode): CertDomain must not be empty — EnsureCertificate will reject this and the container will restart-loop")"
+                    print_fix "$(_t "用菜单 11 / yunzes-node edit-config 填上 CertDomain，或把 CertMode 改成 \"none\"" \
+                                    "Use menu 11 / yunzes-node edit-config to set CertDomain, or change CertMode to \"none\"")"
+                    errors=$((errors+1))
+                fi
+                ;;
+            *)
+                print_warn "$(_t "节点 #$idx: 未知 CertMode '$cert_mode'，建议改为 none/file/self/http/dns 之一" "Node #$idx: unknown CertMode '$cert_mode' (use none/file/self/http/dns)")"
+                warns=$((warns+1))
+                ;;
+        esac
+    done
+    if (( errors == 0 )); then
+        print_ok "$(_t "validate_config 通过 ($total 个节点, $warns warning)" "validate_config passed ($total nodes, $warns warning)")"
+        return 0
+    else
+        print_fail "$(_t "validate_config 失败: $errors 个错误" "validate_config failed: $errors error(s)")"
+        return 1
+    fi
+}
+
+# preflight_panel_check probes each node's actual API URL (not just the
+# ApiHost root). Catches "wrong panel" / "wrong path version" before
+# launching the container and chasing red herring restart loops.
+preflight_panel_check() {
+    [[ -f "$CONFIG_FILE" ]] || return 0
+    jq empty "$CONFIG_FILE" 2>/dev/null || return 0
+    print_step "$(_t '预检: panel API 可达性' 'Preflight: panel API reachability')"
+    local total
+    total=$(jq '.Nodes | length // 0' "$CONFIG_FILE")
+    local idx host node_id ntype path code key
+    local fatal=0
+    for ((idx=0; idx<total; idx++)); do
+        host=$(jq -r    ".Nodes[$idx].ApiHost  // empty" "$CONFIG_FILE")
+        node_id=$(jq -r ".Nodes[$idx].NodeID  // empty" "$CONFIG_FILE")
+        ntype=$(jq -r   ".Nodes[$idx].NodeType // empty" "$CONFIG_FILE")
+        key=$(jq -r     ".Nodes[$idx].ApiKey  // empty" "$CONFIG_FILE")
+        if [[ -z "$host" ]]; then
+            print_warn "$(_t "节点 #$idx: ApiHost 为空，跳过预检" "Node #$idx: ApiHost empty, skipping")"
+            continue
+        fi
+        path="${host%/}/v1/server/config?protocol=${ntype}&server_id=${node_id}&secret_key=${key}"
+        print_cmd "curl -s --connect-timeout 5 ${host%/}/v1/server/config?protocol=${ntype}&server_id=${node_id}&secret_key=***"
+        code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "$path" || true)
+        case "$code" in
+            200)
+                print_ok "$(_t "节点 #$idx ($ntype/$node_id): HTTP 200 — panel 返回节点配置" "Node #$idx ($ntype/$node_id): HTTP 200 — panel returns node config")"
+                ;;
+            301|302|303|307|308)
+                print_warn "$(_t "节点 #$idx: HTTP $code 重定向 — 检查 ApiHost 是否带 https://" "Node #$idx: HTTP $code redirect — check ApiHost protocol")"
+                ;;
+            401|403)
+                print_warn "$(_t "节点 #$idx: HTTP $code — ApiKey 错误或权限不足" "Node #$idx: HTTP $code — wrong ApiKey or insufficient privilege")"
+                ;;
+            404)
+                print_fail "$(_t "节点 #$idx: HTTP 404 — 路径或 NodeID 不存在；请确认 panel 与 yunzes-node 的 API 兼容（/v1/server/config）" \
+                                "Node #$idx: HTTP 404 — path or NodeID not found; ensure panel speaks the /v1/server/config API")"
+                fatal=$((fatal+1))
+                ;;
+            5*)
+                print_warn "$(_t "节点 #$idx: HTTP $code — panel 内部错误" "Node #$idx: HTTP $code — panel internal error")"
+                ;;
+            000|"")
+                print_fail "$(_t "节点 #$idx: 无法连接 $host" "Node #$idx: cannot connect to $host")"
+                fatal=$((fatal+1))
+                ;;
+            *)
+                print_info "$(_t "节点 #$idx: HTTP $code (具体含义看 panel 文档)" "Node #$idx: HTTP $code (see your panel docs)")"
+                ;;
+        esac
+    done
+    if (( fatal > 0 )); then
+        print_warn "$(_t "panel 预检有 $fatal 个 FAIL — 容器启动后大概率出现 \"Run nodes failed\" 并触发 restart 循环" \
+                        "panel preflight has $fatal FAIL(s) — container will likely log 'Run nodes failed' and restart-loop")"
+        if ! confirm "$(_t '是否仍然继续启动 (Y/n)' 'Continue starting anyway (Y/n)')" y; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # Backup / Restore
 # -----------------------------------------------------------------------------
@@ -643,9 +756,7 @@ backup_now() {
     ts=$(date +%Y%m%d-%H%M%S)
     dir="$BACKUP_DIR/$ts"
     mkdir -p "$dir"
-    if [[ -f "$CONFIG_FILE" ]]; then
-        cp -p "$CONFIG_FILE" "$dir/config.json"
-    fi
+    [[ -f "$CONFIG_FILE" ]] && cp -p "$CONFIG_FILE" "$dir/config.json"
     if [[ -d "$CERTS_DIR" ]]; then
         tar -C "$CONFIG_DIR" -czf "$dir/certs.tar.gz" certs 2>/dev/null || true
     fi
@@ -669,68 +780,62 @@ list_backups() {
 
 restore_from_backup() {
     local name="$1" dir="$BACKUP_DIR/$1"
-    [[ -d "$dir" ]] || { print_fail "备份目录不存在：$dir"; return 1; }
-    print_step "回滚到备份：$name"
+    [[ -d "$dir" ]] || { print_fail "$(_t "备份目录不存在：$dir" "Backup dir missing: $dir")"; return 1; }
+    print_step "$(_t "回滚到备份：$name" "Restoring backup: $name")"
     if [[ -f "$dir/config.json" ]]; then
         cp -p "$dir/config.json" "$CONFIG_FILE"
-        print_ok "config.json 恢复"
+        print_ok "$(_t 'config.json 恢复' 'config.json restored')"
     fi
     if [[ -f "$dir/certs.tar.gz" ]]; then
         tar -C "$CONFIG_DIR" -xzf "$dir/certs.tar.gz" 2>/dev/null \
-            || print_warn "证书包解压失败（可手动 tar -xzvf 查看）"
-        print_ok "certs/ 恢复"
+            || print_warn "$(_t '证书包解压失败（可手动 tar -xzvf 查看）' 'certs.tar.gz extract failed')"
+        print_ok "$(_t 'certs/ 恢复' 'certs/ restored')"
     fi
     local image_to_use=""
     [[ -f "$dir/image-name.txt" ]] && image_to_use="$(<"$dir/image-name.txt")"
     [[ -z "$image_to_use" ]] && image_to_use="$DEFAULT_IMAGE"
-    print_info "使用镜像：$image_to_use"
+    print_info "$(_t "使用镜像：$image_to_use" "Using image: $image_to_use")"
     print_cmd "docker rm -f $NAME"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     if ! _docker_run "$image_to_use" "always"; then
-        print_fail "回滚启动容器失败"
+        print_fail "$(_t '回滚启动容器失败' 'Rollback container start failed')"
         return 1
     fi
     return 0
 }
 
 # -----------------------------------------------------------------------------
-# Source-tree management — clone / pull from REPO_URL.
+# Source-tree management
 # -----------------------------------------------------------------------------
 fetch_or_use_source() {
-    # Echos a directory path on stdout; status-only output goes to stderr so
-    # callers can `local d=$(fetch_or_use_source)`.
     if [[ -d "$SRC_DIR/.git" ]]; then
-        print_info "已存在源码：$SRC_DIR" >&2
-        print_choice "1)" "git pull (拉取最新)"          >&2
-        print_choice "2)" "使用现有源码"                 >&2
-        print_choice "3)" "删除后重新 clone"             >&2
-        print_choice "4)" "退出"                         >&2
+        print_info "$(_t "已存在源码：$SRC_DIR" "Existing source: $SRC_DIR")" >&2
+        print_choice "1)" "$(_t 'git pull (拉取最新)' 'git pull (latest)')"           >&2
+        print_choice "2)" "$(_t '使用现有源码' 'Use existing source')"                  >&2
+        print_choice "3)" "$(_t '删除后重新 clone' 'Wipe and re-clone')"                >&2
+        print_choice "4)" "$(_t '退出' 'Exit')"                                         >&2
         local ans
-        printf "%b请选择 [1-4]: %b" "${C_CYAN}" "${C_PLAIN}" >&2
+        printf "%b%s%b" "${C_CYAN}" "$(_t '请选择 [1-4]: ' 'Select [1-4]: ')" "${C_PLAIN}" >&2
         read -r ans
         case "$ans" in
             1)
                 print_cmd "git -C $SRC_DIR pull --ff-only" >&2
                 if ! ( cd "$SRC_DIR" && git pull --ff-only ) >&2; then
-                    print_warn "git pull 失败（可能本地有未提交改动）" >&2
-                    if ! confirm "继续使用当前 $SRC_DIR 源码" y; then
+                    print_warn "$(_t 'git pull 失败（可能本地有未提交改动）' 'git pull failed (possibly local changes)')" >&2
+                    if ! confirm "$(_t "继续使用当前 $SRC_DIR 源码" "Continue with existing $SRC_DIR")" y; then
                         return 1
                     fi
-                fi
-                ;;
-            2) print_info "使用现有 $SRC_DIR" >&2 ;;
+                fi ;;
+            2) print_info "$(_t "使用现有 $SRC_DIR" "Using existing $SRC_DIR")" >&2 ;;
             3)
-                print_danger "将删除 $SRC_DIR 重新 clone" >&2
-                if ! confirm "继续" n; then
-                    return 1
-                fi
+                print_danger "$(_t "将删除 $SRC_DIR 重新 clone" "Will wipe $SRC_DIR and re-clone")" >&2
+                if ! confirm "$(_t '继续' 'Continue')" n; then return 1; fi
                 print_cmd "rm -rf $SRC_DIR" >&2
                 rm -rf "$SRC_DIR"
                 print_cmd "git clone $REPO_URL $SRC_DIR" >&2
-                git clone "$REPO_URL" "$SRC_DIR" >&2 || return 1
-                ;;
+                git clone "$REPO_URL" "$SRC_DIR" >&2 || return 1 ;;
             4) return 1 ;;
-            *) print_warn "无效选项，使用现有源码" >&2 ;;
+            *) print_warn "$(_t '无效选项，使用现有源码' 'Invalid option, using existing source')" >&2 ;;
         esac
     else
         mkdir -p "$(dirname "$SRC_DIR")"
@@ -744,7 +849,6 @@ fetch_or_use_source() {
 # Container ops
 # -----------------------------------------------------------------------------
 _docker_run() {
-    # _docker_run IMAGE RESTART_POLICY [extra-args ...]
     local image="$1" restart="${2:-always}"; shift 2 || true
     print_cmd "docker run -d --name $NAME --network host --restart $restart -v $CONFIG_DIR:/etc/yunzes-node $* $image"
     docker run -d \
@@ -767,33 +871,60 @@ ensure_dirs() {
 # -----------------------------------------------------------------------------
 verify_basic() {
     local pass=0 myfail=0
-    print_step "Verify L1: 基础"
+    print_step "$(_t 'Verify L1: 基础' 'Verify L1: basics')"
     if container_running; then
-        print_ok "容器 $NAME 运行中"; pass=$((pass+1))
+        print_ok "$(_t "容器 $NAME 运行中" "Container $NAME running")"; pass=$((pass+1))
+        # Restart-loop detector: if a container has restarted >=3 times in
+        # the last 60s it almost certainly hit an issue Go-side. We surface
+        # this so verify_basic doesn't return PASS for a thrashing container.
+        local restart_count finished_at
+        restart_count=$(docker inspect --format '{{.RestartCount}}' "$NAME" 2>/dev/null || echo 0)
+        finished_at=$( docker inspect --format '{{.State.FinishedAt}}' "$NAME" 2>/dev/null || true)
+        if (( restart_count >= 3 )); then
+            local recent_starts
+            recent_starts=$(docker events --since 60s --until 0s --filter "container=$NAME" --filter event=start 2>/dev/null | wc -l || echo 0)
+            if (( recent_starts >= 3 )); then
+                print_fail "$(_t "RestartCount=$restart_count 且最近 60 秒发生 $recent_starts 次 start — 容器在重启循环" \
+                                "RestartCount=$restart_count and $recent_starts starts in the last 60s — container is restart-looping")"
+                print_fix "$(_t '查看 docker logs yunzes-node；或 yunzes-node show-config 检查 CertDomain / 配置' \
+                                'Inspect docker logs yunzes-node; or yunzes-node show-config to verify CertDomain / config')"
+                myfail=$((myfail+1))
+            else
+                print_warn "$(_t "RestartCount=$restart_count（历史累计；最近 60 秒看起来稳定）" \
+                                "RestartCount=$restart_count (historic; recent 60s seems stable)")"
+            fi
+        fi
     else
-        print_fail "容器 $NAME 未运行"; myfail=$((myfail+1))
+        local last_status
+        last_status=$(docker inspect --format '{{.State.Status}}' "$NAME" 2>/dev/null || true)
+        case "$last_status" in
+            restarting) print_fail "$(_t "容器 $NAME 状态: restarting (重启循环)" "Container $NAME status: restarting (loop)")" ;;
+            exited)     print_fail "$(_t "容器 $NAME 状态: exited" "Container $NAME status: exited")" ;;
+            *)          print_fail "$(_t "容器 $NAME 未运行" "Container $NAME not running")" ;;
+        esac
+        myfail=$((myfail+1))
     fi
     if [[ -f "$CONFIG_FILE" ]]; then
         if jq empty "$CONFIG_FILE" 2>/dev/null; then
-            print_ok "config.json 存在且合法"; pass=$((pass+1))
+            print_ok "$(_t 'config.json 存在且合法' 'config.json present and valid')"; pass=$((pass+1))
         else
-            print_fail "config.json 存在但非合法 JSON"; myfail=$((myfail+1))
+            print_fail "$(_t 'config.json 存在但非合法 JSON' 'config.json present but invalid JSON')"; myfail=$((myfail+1))
         fi
     else
-        print_fail "config.json 不存在"; myfail=$((myfail+1))
+        print_fail "$(_t 'config.json 不存在' 'config.json missing')"; myfail=$((myfail+1))
     fi
     if [[ -d "$CERTS_DIR" ]]; then
-        print_ok "certs/ 存在"; pass=$((pass+1))
+        print_ok "$(_t 'certs/ 存在' 'certs/ present')"; pass=$((pass+1))
     else
-        print_warn "certs/ 不存在（仅 cleartext / reality 节点可接受）"
+        print_warn "$(_t 'certs/ 不存在（仅 cleartext / reality 节点可接受）' 'certs/ missing (acceptable for cleartext / reality only)')"
     fi
     local bad
     bad=$(docker logs "$NAME" 2>&1 | grep -E -i 'panic|runtime error|nil pointer dereference|segmentation violation|fatal error' | head -5 || true)
     if [[ -z "$bad" ]]; then
-        print_ok "docker logs 无 panic / fatal / runtime error"; pass=$((pass+1))
+        print_ok "$(_t 'docker logs 无 panic / fatal / runtime error' 'docker logs has no panic / fatal / runtime error')"; pass=$((pass+1))
     else
-        print_fail "docker logs 出现 panic / fatal / runtime error:"
-        print_info "以下为匹配到的原始日志行:"
+        print_fail "$(_t 'docker logs 出现 panic / fatal / runtime error:' 'docker logs contains panic / fatal / runtime error:')"
+        print_info "$(_t '以下为匹配到的原始日志行:' 'Matching raw log lines:')"
         echo "$bad" | sed 's/^/      /'
         myfail=$((myfail+1))
     fi
@@ -802,27 +933,21 @@ verify_basic() {
     return $myfail
 }
 
-# extract_listens_from_logs — parse `Adding node inbound` lines and emit
-# "PROTOCOL PORT TRANSPORT" rows. Lines are well-formed logrus key=value:
-# `... msg="Adding node inbound" core=xray network="[tcp udp]" port=8102 protocol=shadowsocks ...`
 extract_listens_from_logs() {
     docker logs --tail 1000 "$NAME" 2>&1 \
         | grep -F 'msg="Adding node inbound"' \
         | while IFS= read -r line; do
             local port proto network
-            port=$(echo    "$line" | grep -oE 'port=[0-9]+'                     | head -1 | cut -d= -f2)
-            proto=$(echo   "$line" | grep -oE 'protocol=[a-z0-9]+'              | head -1 | cut -d= -f2)
-            network=$(echo "$line" | grep -oE 'network="\[[^]]+\]"'             | head -1 | sed -E 's/network="\[([^]]+)\]"/\1/')
+            port=$(echo    "$line" | grep -oE 'port=[0-9]+'                | head -1 | cut -d= -f2)
+            proto=$(echo   "$line" | grep -oE 'protocol=[a-z0-9]+'         | head -1 | cut -d= -f2)
+            network=$(echo "$line" | grep -oE 'network="\[[^]]+\]"'        | head -1 | sed -E 's/network="\[([^]]+)\]"/\1/')
             [[ -z "$port" || -z "$network" ]] && continue
             local t
-            for t in $network; do
-                echo "$proto $port $t"
-            done
+            for t in $network; do echo "$proto $port $t"; done
         done
 }
 
 _listen_active() {
-    # _listen_active PORT TRANSPORT — returns 0 iff something is listening.
     local port="$1" proto="$2"
     case "$proto" in
         tcp) ss -lntp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$"' | grep -q .;;
@@ -833,64 +958,60 @@ _listen_active() {
 
 verify_network() {
     local pass=0 myfail=0 mywarn=0
-    print_step "Verify L2: 网络"
+    print_step "$(_t 'Verify L2: 网络' 'Verify L2: network')"
     local mode
     mode=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$NAME" 2>/dev/null || true)
     if [[ "$mode" == "host" ]]; then
-        print_ok "容器使用 host network"; pass=$((pass+1))
+        print_ok "$(_t '容器使用 host network' 'Container in host network mode')"; pass=$((pass+1))
     elif [[ -z "$mode" ]]; then
-        print_warn "无法读取容器网络模式（容器可能不存在）"; mywarn=$((mywarn+1))
+        print_warn "$(_t '无法读取容器网络模式（容器可能不存在）' 'Cannot read network mode (container missing?)')"; mywarn=$((mywarn+1))
     else
-        print_warn "容器使用 $mode 而非 host network（生产建议 host）"; mywarn=$((mywarn+1))
+        print_warn "$(_t "容器使用 $mode 而非 host network" "Container in $mode (production wants host)")"; mywarn=$((mywarn+1))
     fi
     if [[ ! -f "$CONFIG_FILE" ]] || ! command -v ss >/dev/null 2>&1; then
         printf "L2: %bPASS=%d%b  %bWARN=%d%b  %bFAIL=%d%b\n" \
             "${C_GREEN}" "$pass" "${C_PLAIN}" "${C_YELLOW}" "$mywarn" "${C_PLAIN}" "${C_RED}" "$myfail" "${C_PLAIN}"
         return $myfail
     fi
-    # Real port-listen check by parsing docker logs.
     local rows row p port t
     rows="$(extract_listens_from_logs)"
     if [[ -z "$rows" ]]; then
-        print_warn "docker logs 未找到 'Adding node inbound' 行（容器尚未上线节点？）"
+        print_warn "$(_t "docker logs 未找到 'Adding node inbound' 行（容器尚未上线节点？）" "docker logs has no 'Adding node inbound' line (no node started?)")"
         mywarn=$((mywarn+1))
     else
         while IFS= read -r row; do
             [[ -z "$row" ]] && continue
             read -r p port t <<<"$row"
             if _listen_active "$port" "$t"; then
-                print_ok "$p $port/$t 实际监听 ✓"; pass=$((pass+1))
+                print_ok "$(_t "$p $port/$t 实际监听 ✓" "$p $port/$t actively listening ✓")"; pass=$((pass+1))
             else
-                print_fail "$p $port/$t 期待监听但未发现"; myfail=$((myfail+1))
+                print_fail "$(_t "$p $port/$t 期待监听但未发现" "$p $port/$t expected listen NOT FOUND")"; myfail=$((myfail+1))
             fi
         done <<<"$rows"
-        # Shadowsocks dual-listen sanity: count tcp+udp pairs.
         local ss_tcp ss_udp
         ss_tcp=$(echo "$rows" | awk '$1=="shadowsocks" && $3=="tcp"' | wc -l)
         ss_udp=$(echo "$rows" | awk '$1=="shadowsocks" && $3=="udp"' | wc -l)
         if (( ss_tcp + ss_udp > 0 )); then
             if (( ss_tcp == ss_udp )); then
-                print_ok "shadowsocks 节点 tcp+udp 配对一致 (各 $ss_tcp 个)"; pass=$((pass+1))
+                print_ok "$(_t "shadowsocks 节点 tcp+udp 配对一致 (各 $ss_tcp 个)" "shadowsocks tcp+udp paired ($ss_tcp each)")"; pass=$((pass+1))
             else
-                print_fail "shadowsocks tcp/udp 不配对 (tcp=$ss_tcp udp=$ss_udp)"; myfail=$((myfail+1))
+                print_fail "$(_t "shadowsocks tcp/udp 不配对 (tcp=$ss_tcp udp=$ss_udp)" "shadowsocks tcp/udp mismatch (tcp=$ss_tcp udp=$ss_udp)")"; myfail=$((myfail+1))
             fi
         fi
-        # Hysteria2/Tuic must be UDP-only.
         local udp_only
         udp_only=$(echo "$rows" | awk '$1 ~ /^(hysteria2?|tuic)$/ && $3=="udp"' | wc -l)
         if (( udp_only > 0 )); then
-            print_ok "hysteria2 / tuic 节点 udp 监听 (共 $udp_only 个)"; pass=$((pass+1))
+            print_ok "$(_t "hysteria2 / tuic 节点 udp 监听 (共 $udp_only 个)" "hysteria2 / tuic udp listening ($udp_only)")"; pass=$((pass+1))
         fi
     fi
-    # ACME 80/tcp hint
     local hits owner80
     hits=$(ss -lntp 2>/dev/null | awk '$4 ~ /:80$/' || true)
     if [[ -n "$hits" ]]; then
         owner80=$(echo "$hits" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
         if [[ "$owner80" == "$NAME" ]]; then
-            print_ok "80/tcp 由 yunzes-node 自身监听"; pass=$((pass+1))
+            print_ok "$(_t '80/tcp 由 yunzes-node 自身监听' '80/tcp owned by yunzes-node')"; pass=$((pass+1))
         else
-            print_warn "80/tcp 被 ${owner80:-未知} 占用（若用 ACME HTTP-01 会失败）"; mywarn=$((mywarn+1))
+            print_warn "$(_t "80/tcp 被 ${owner80:-未知} 占用（若用 ACME HTTP-01 会失败）" "80/tcp held by ${owner80:-unknown} (ACME HTTP-01 will fail)")"; mywarn=$((mywarn+1))
         fi
     fi
     printf "L2: %bPASS=%d%b  %bWARN=%d%b  %bFAIL=%d%b\n" \
@@ -900,30 +1021,33 @@ verify_network() {
 
 verify_business() {
     local pass=0 myfail=0 mywarn=0
-    print_step "Verify L3: 业务"
+    print_step "$(_t 'Verify L3: 业务' 'Verify L3: business')"
     if [[ -f "$CONFIG_FILE" ]] && jq empty "$CONFIG_FILE" 2>/dev/null; then
         local hosts h code
         mapfile -t hosts < <(jq -r '.Nodes[]?.ApiHost // empty' "$CONFIG_FILE" | sort -u)
         for h in "${hosts[@]}"; do
             [[ -z "$h" ]] && continue
             code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "$h" || true)
-            if [[ "$code" =~ ^[2345] ]]; then
-                print_ok "panel 可达：$h  HTTP $code"; pass=$((pass+1))
-            else
-                print_warn "panel 无响应：$h（curl 返回 $code）"; mywarn=$((mywarn+1))
-            fi
+            case "$code" in
+                2*|3*) print_ok   "$(_t "panel 可达：$h  HTTP $code" "panel reachable: $h  HTTP $code")"; pass=$((pass+1)) ;;
+                401|403) print_warn "$(_t "panel 401/403：$h  鉴权问题" "panel 401/403: $h  auth issue")"; mywarn=$((mywarn+1)) ;;
+                404) print_warn "$(_t "panel 404：$h  路径可能不对" "panel 404: $h  wrong path?")"; mywarn=$((mywarn+1)) ;;
+                5*) print_fail "$(_t "panel $code：$h  服务端错误" "panel $code: $h  server error")"; myfail=$((myfail+1)) ;;
+                000|"") print_fail "$(_t "无法连接：$h" "Cannot reach: $h")"; myfail=$((myfail+1)) ;;
+                *) print_info "$(_t "panel $code：$h" "panel $code: $h")" ;;
+            esac
         done
     else
-        print_warn "无可用 config.json，跳过 panel 探活"; mywarn=$((mywarn+1))
+        print_warn "$(_t '无可用 config.json，跳过 panel 探活' 'No config.json, skipping panel probe')"; mywarn=$((mywarn+1))
     fi
     local logs
     logs="$(docker logs --tail 500 "$NAME" 2>&1 || true)"
     local marker
     for marker in "Start yunzes-node" "Core Selector" "Adding node inbound" "logical_tag" "core=" "runtime_key" "protocol=" "server_id" "port="; do
         if echo "$logs" | grep -qF "$marker"; then
-            print_ok "日志含字段：$marker"; pass=$((pass+1))
+            print_ok "$(_t "日志含字段：$marker" "log contains: $marker")"; pass=$((pass+1))
         else
-            print_warn "日志未见：$marker"; mywarn=$((mywarn+1))
+            print_warn "$(_t "日志未见：$marker" "log missing: $marker")"; mywarn=$((mywarn+1))
         fi
     done
     printf "L3: %bPASS=%d%b  %bWARN=%d%b  %bFAIL=%d%b\n" \
@@ -937,143 +1061,137 @@ cmd_verify() {
     verify_business; local r3=$?; echo
     print_separator
     if (( r1 + r2 + r3 == 0 )); then
-        print_ok "全部 verify 等级通过"; return 0
+        print_ok "$(_t '全部 verify 等级通过' 'All verify levels passed')"
+        return 0
     fi
-    print_fail "verify 有 FAIL 项；查看上方输出"
+    print_fail "$(_t 'verify 有 FAIL 项；查看上方输出' 'verify has FAIL items; see output above')"
     return 1
 }
 
 # -----------------------------------------------------------------------------
-# Install / Update / Lifecycle
+# Install / Lifecycle
 # -----------------------------------------------------------------------------
 cmd_install() {
     parse_flags "$@"
     reset_precheck_counters
     basic_precheck install
     if (( PRECHECK_FAIL > 0 )); then
-        print_fail "basic_precheck 不通过 — 修完上面的 [FAIL] 项再重试"
+        print_fail "$(_t 'basic_precheck 不通过 — 修完上面的 [FAIL] 项再重试' 'basic_precheck failed — fix [FAIL] items above')"
         return 1
     fi
-
-    if ! ensure_dependencies; then
-        return 1
-    fi
-
+    if ! ensure_dependencies; then return 1; fi
     reset_precheck_counters
     docker_precheck
-    if (( PRECHECK_FAIL > 0 )); then
-        print_fail "docker_precheck 不通过 — 检查 Docker daemon / 用户组"
-        return 1
-    fi
+    (( PRECHECK_FAIL > 0 )) && { print_fail "$(_t 'docker_precheck 不通过 — 检查 Docker daemon / 用户组' 'docker_precheck failed — check Docker daemon / user group')"; return 1; }
 
     ensure_dirs
 
-    # 1. config
     if [[ -f "$CONFIG_FILE" ]]; then
-        print_info "已检测到 $CONFIG_FILE"
-        print_choice "1)" "使用现有配置"
-        print_choice "2)" "备份后重新生成"
-        print_choice "3)" "退出"
+        print_info "$(_t "已检测到 $CONFIG_FILE" "Detected $CONFIG_FILE")"
+        print_choice "1)" "$(_t '使用现有配置'    'Use existing config')"
+        print_choice "2)" "$(_t '备份后重新生成'  'Back up and regenerate')"
+        print_choice "3)" "$(_t '退出'            'Exit')"
         local ans
-        ans=$(prompt_read "请选择" "1")
+        ans=$(prompt_read "$(_t '请选择' 'Select')" "1")
         case "$ans" in
-            1) print_info "使用现有配置" ;;
+            1) print_info "$(_t '使用现有配置' 'Using existing config')" ;;
             2)
                 local b
                 b=$(backup_now)
-                print_ok "已备份到 $b"
+                print_ok "$(_t "已备份到 $b" "Backed up to $b")"
                 gen_config_template "$CONFIG_FILE"
-                if confirm "是否进入交互式生成 (推荐)" y; then
+                if confirm "$(_t '是否进入交互式生成 (推荐)' 'Enter interactive generation (recommended)')" y; then
                     gen_config_interactive
-                fi
-                ;;
-            3) print_info "用户取消"; return 0 ;;
-            *) print_warn "无效选项，使用现有配置" ;;
+                fi ;;
+            3) print_info "$(_t '用户取消' 'User cancelled')"; return 0 ;;
+            *) print_warn "$(_t '无效选项，使用现有配置' 'Invalid option, using existing config')" ;;
         esac
     else
-        print_info "config.json 不存在，先生成模板"
+        print_info "$(_t 'config.json 不存在，先生成模板' 'config.json missing, writing template first')"
         gen_config_template "$CONFIG_FILE.example"
-        if confirm "是否进入交互式生成 $CONFIG_FILE" y; then
+        if confirm "$(_t "是否进入交互式生成 $CONFIG_FILE" "Enter interactive generation for $CONFIG_FILE")" y; then
             gen_config_interactive
         else
-            print_warn "请先 cp $CONFIG_FILE.example $CONFIG_FILE 并按需修改，再重跑安装"
+            print_warn "$(_t "请先 cp $CONFIG_FILE.example $CONFIG_FILE 并按需修改，再重跑安装" \
+                            "Run: cp $CONFIG_FILE.example $CONFIG_FILE  then edit and re-run install")"
             return 0
         fi
     fi
 
-    # 2. file_precheck (advisory)
     file_precheck
 
-    # 3. image source
+    # NEW: validate the config we just generated / kept BEFORE building
+    # the image. Catches empty CertDomain, dup NodeID etc. fast.
+    if ! validate_config; then
+        print_fail "$(_t '配置体检失败；请用 yunzes-node edit-config 修复后重试' 'Config validation failed; fix via yunzes-node edit-config and retry')"
+        return 1
+    fi
+
     if ! docker image inspect "$DEFAULT_IMAGE" >/dev/null 2>&1; then
-        print_info "镜像 $DEFAULT_IMAGE 不存在。请选择镜像来源:"
-        print_choice "1)" "从 GitHub 拉源码并本地构建 (推荐)"
-        print_choice "2)" "使用当前目录源码构建"
-        print_choice "3)" "拉取远程 Docker 镜像"
-        print_choice "4)" "手动输入镜像名"
+        print_info "$(_t "镜像 $DEFAULT_IMAGE 不存在。请选择镜像来源:" "Image $DEFAULT_IMAGE missing. Choose source:")"
+        print_choice "1)" "$(_t '从 GitHub 拉源码并本地构建 (推荐)' 'Clone from GitHub and build locally (recommended)')"
+        print_choice "2)" "$(_t '使用当前目录源码构建'              'Build from current source checkout')"
+        print_choice "3)" "$(_t '拉取远程 Docker 镜像'              'Pull remote Docker image')"
+        print_choice "4)" "$(_t '手动输入镜像名'                    'Specify image name manually')"
         local choice img d
-        choice=$(prompt_read "请选择" "1")
+        choice=$(prompt_read "$(_t '请选择' 'Select')" "1")
         case "$choice" in
             1)
-                d=$(fetch_or_use_source) || { print_fail "源码获取失败"; return 1; }
-                print_step "在 $d 执行 docker build"
+                d=$(fetch_or_use_source) || { print_fail "$(_t '源码获取失败' 'Source fetch failed')"; return 1; }
+                print_step "$(_t "在 $d 执行 docker build" "docker build in $d")"
                 print_cmd "docker build -t $DEFAULT_IMAGE ."
                 if ! ( cd "$d" && docker build -t "$DEFAULT_IMAGE" . ); then
-                    print_fail "docker build 失败"
-                    return 1
+                    print_fail "$(_t 'docker build 失败' 'docker build failed')"; return 1
                 fi
-                print_ok "镜像构建完成: $DEFAULT_IMAGE"
-                ;;
+                print_ok "$(_t "镜像构建完成: $DEFAULT_IMAGE" "Image built: $DEFAULT_IMAGE")" ;;
             2)
                 if [[ -z "$SOURCE_DIR" ]]; then
-                    print_fail "未在源码目录运行；请改用选项 1 / 3 / 4"
+                    print_fail "$(_t '未在源码目录运行；请改用选项 1 / 3 / 4' 'Not in source checkout; use option 1 / 3 / 4 instead')"
                     return 1
                 fi
                 print_cmd "docker build -t $DEFAULT_IMAGE ."
-                if ! ( cd "$SOURCE_DIR" && docker build -t "$DEFAULT_IMAGE" . ); then
-                    print_fail "docker build 失败"; return 1
-                fi
-                ;;
+                ( cd "$SOURCE_DIR" && docker build -t "$DEFAULT_IMAGE" . ) \
+                    || { print_fail "$(_t 'docker build 失败' 'docker build failed')"; return 1; } ;;
             3)
-                img=$(prompt_read "拉取的镜像名" "$DEFAULT_IMAGE")
+                img=$(prompt_read "$(_t '拉取的镜像名' 'Image to pull')" "$DEFAULT_IMAGE")
                 print_cmd "docker pull $img"
-                docker pull "$img" || { print_fail "docker pull 失败"; return 1; }
+                docker pull "$img" || { print_fail "$(_t 'docker pull 失败' 'docker pull failed')"; return 1; }
                 if [[ "$img" != "$DEFAULT_IMAGE" ]]; then
                     print_cmd "docker tag $img $DEFAULT_IMAGE"
                     docker tag "$img" "$DEFAULT_IMAGE"
                 fi
-                print_ok "已 tag 为 $DEFAULT_IMAGE"
-                ;;
+                print_ok "$(_t "已 tag 为 $DEFAULT_IMAGE" "Tagged as $DEFAULT_IMAGE")" ;;
             4)
-                img=$(prompt_read "镜像名" "")
-                [[ -z "$img" ]] && { print_fail "镜像名为空"; return 1; }
+                img=$(prompt_read "$(_t '镜像名' 'Image name')" "")
+                [[ -z "$img" ]] && { print_fail "$(_t '镜像名为空' 'Image name empty')"; return 1; }
                 print_cmd "docker tag $img $DEFAULT_IMAGE"
-                docker tag "$img" "$DEFAULT_IMAGE" || { print_fail "tag 失败"; return 1; }
-                ;;
-            *) print_fail "无效选项"; return 1 ;;
+                docker tag "$img" "$DEFAULT_IMAGE" \
+                    || { print_fail "$(_t 'tag 失败' 'tag failed')"; return 1; } ;;
+            *) print_fail "$(_t '无效选项' 'Invalid option')"; return 1 ;;
         esac
     else
-        print_info "已存在镜像 $DEFAULT_IMAGE — 复用"
+        print_info "$(_t "已存在镜像 $DEFAULT_IMAGE — 复用" "Reusing existing image $DEFAULT_IMAGE")"
     fi
 
-    # 4. backup before any container churn
+    # NEW: panel-API preflight after we have an image but BEFORE running.
+    # Catches "wrong panel" before the container restart-loops.
+    preflight_panel_check || return 1
+
     local b
     b=$(backup_now)
-    print_info "Pre-install 备份: $b"
+    print_info "$(_t "Pre-install 备份: $b" "Pre-install backup: $b")"
 
-    # 5. start
     print_cmd "docker rm -f $NAME"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
-    print_step "启动容器 (restart=$RESTART_POLICY)"
+    print_step "$(_t "启动容器 (restart=$RESTART_POLICY)" "Starting container (restart=$RESTART_POLICY)")"
     if ! _docker_run "$DEFAULT_IMAGE" "$RESTART_POLICY"; then
-        print_fail "docker run 失败"
+        print_fail "$(_t 'docker run 失败' 'docker run failed')"
         return 1
     fi
-    print_ok "容器已启动: $NAME"
+    print_ok "$(_t "容器已启动: $NAME" "Container started: $NAME")"
 
-    # 6. verify
-    sleep 3
-    cmd_verify || print_warn "verify 有未通过项，请查看上方输出"
+    sleep 4
+    cmd_verify || print_warn "$(_t 'verify 有未通过项，请查看上方输出' 'verify has issues — see output above')"
 }
 
 cmd_update() {
@@ -1087,150 +1205,149 @@ cmd_update() {
     (( PRECHECK_FAIL > 0 )) && return 1
 
     if ! container_exists; then
-        print_warn "容器不存在；切换到 install 流程"
+        print_warn "$(_t '容器不存在；切换到 install 流程' 'Container missing; switching to install')"
         cmd_install "$@"
         return $?
     fi
 
+    if ! validate_config; then
+        if ! confirm "$(_t '当前 config 有 FAIL 项，是否仍然继续升级' 'Current config has FAIL; continue upgrade anyway')" n; then
+            return 1
+        fi
+    fi
+
     local backup_dir previous_image
     backup_dir=$(backup_now)
-    print_ok "升级前已备份: $backup_dir"
+    print_ok "$(_t "升级前已备份: $backup_dir" "Pre-upgrade backup: $backup_dir")"
     previous_image=$(current_image_id)
 
-    print_info "升级镜像来源:"
-    print_choice "1)" "从 GitHub 拉源码并本地构建 (与最新 commit 对齐)"
-    print_choice "2)" "使用当前目录源码构建"
-    print_choice "3)" "拉取远程镜像"
-    print_choice "4)" "跳过镜像更新（仅重新创建容器）"
+    print_info "$(_t '升级镜像来源:' 'Upgrade image source:')"
+    print_choice "1)" "$(_t '从 GitHub 拉源码并本地构建 (与最新 commit 对齐)' 'Clone from GitHub and build (aligned with latest commit)')"
+    print_choice "2)" "$(_t '使用当前目录源码构建' 'Build from current source checkout')"
+    print_choice "3)" "$(_t '拉取远程镜像' 'Pull remote image')"
+    print_choice "4)" "$(_t '跳过镜像更新（仅重新创建容器）' 'Skip image update (only recreate container)')"
     local choice img d
-    choice=$(prompt_read "请选择" "1")
+    choice=$(prompt_read "$(_t '请选择' 'Select')" "1")
     case "$choice" in
-        1)
-            d=$(fetch_or_use_source) || return 1
-            print_cmd "docker build -t $DEFAULT_IMAGE ."
-            ( cd "$d" && docker build -t "$DEFAULT_IMAGE" . ) || { print_fail "build 失败"; return 1; }
-            ;;
-        2)
-            [[ -z "$SOURCE_DIR" ]] && { print_fail "未在源码目录运行"; return 1; }
-            print_cmd "docker build -t $DEFAULT_IMAGE ."
-            ( cd "$SOURCE_DIR" && docker build -t "$DEFAULT_IMAGE" . ) || { print_fail "build 失败"; return 1; }
-            ;;
-        3)
-            img=$(prompt_read "镜像名" "$DEFAULT_IMAGE")
-            print_cmd "docker pull $img"
-            docker pull "$img" || { print_fail "pull 失败"; return 1; }
-            [[ "$img" != "$DEFAULT_IMAGE" ]] && { print_cmd "docker tag $img $DEFAULT_IMAGE"; docker tag "$img" "$DEFAULT_IMAGE"; }
-            ;;
-        4) print_info "跳过镜像更新" ;;
-        *) print_fail "无效选项"; return 1 ;;
+        1) d=$(fetch_or_use_source) || return 1
+           print_cmd "docker build -t $DEFAULT_IMAGE ."
+           ( cd "$d" && docker build -t "$DEFAULT_IMAGE" . ) || { print_fail "build failed"; return 1; } ;;
+        2) [[ -z "$SOURCE_DIR" ]] && { print_fail "$(_t '未在源码目录运行' 'Not in source checkout')"; return 1; }
+           print_cmd "docker build -t $DEFAULT_IMAGE ."
+           ( cd "$SOURCE_DIR" && docker build -t "$DEFAULT_IMAGE" . ) || { print_fail "build failed"; return 1; } ;;
+        3) img=$(prompt_read "$(_t '镜像名' 'Image name')" "$DEFAULT_IMAGE")
+           print_cmd "docker pull $img"
+           docker pull "$img" || { print_fail "$(_t 'pull 失败' 'pull failed')"; return 1; }
+           [[ "$img" != "$DEFAULT_IMAGE" ]] && { print_cmd "docker tag $img $DEFAULT_IMAGE"; docker tag "$img" "$DEFAULT_IMAGE"; } ;;
+        4) print_info "$(_t '跳过镜像更新' 'Skipping image update')" ;;
+        *) print_fail "$(_t '无效选项' 'Invalid option')"; return 1 ;;
     esac
 
-    print_step "停止旧容器"
+    print_step "$(_t '停止旧容器' 'Stopping old container')"
     print_cmd "docker stop $NAME && docker rm $NAME"
     docker stop "$NAME" >/dev/null 2>&1 || true
     docker rm   "$NAME" >/dev/null 2>&1 || true
 
-    print_step "启动新容器 (restart=$RESTART_POLICY)"
+    print_step "$(_t "启动新容器 (restart=$RESTART_POLICY)" "Starting new container (restart=$RESTART_POLICY)")"
     if ! _docker_run "$DEFAULT_IMAGE" "$RESTART_POLICY"; then
-        print_warn "新容器启动失败，触发自动回滚"
+        print_warn "$(_t '新容器启动失败，触发自动回滚' 'New container start failed, auto-rollback')"
         _auto_rollback "$backup_dir" "$previous_image"
         return 1
     fi
     sleep 4
     if ! verify_basic; then
-        print_warn "verify L1 失败，触发自动回滚"
+        print_warn "$(_t 'verify L1 失败，触发自动回滚' 'verify L1 failed, auto-rollback')"
         _auto_rollback "$backup_dir" "$previous_image"
         return 1
     fi
-    print_ok "升级完成"
-    cmd_verify || print_warn "verify 有未通过项，请查看上方输出"
+    print_ok "$(_t '升级完成' 'Upgrade complete')"
+    cmd_verify || print_warn "$(_t 'verify 有未通过项' 'verify has issues')"
 }
 
 _auto_rollback() {
     local backup_dir="$1" prev="$2"
-    print_step "Auto rollback → $backup_dir"
+    print_step "$(_t "Auto rollback → $backup_dir" "Auto rollback → $backup_dir")"
     print_cmd "docker rm -f $NAME"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
-    [[ -f "$backup_dir/config.json"   ]] && cp -p "$backup_dir/config.json" "$CONFIG_FILE"
-    [[ -f "$backup_dir/certs.tar.gz"  ]] && tar -C "$CONFIG_DIR" -xzf "$backup_dir/certs.tar.gz" 2>/dev/null || true
+    [[ -f "$backup_dir/config.json"  ]] && cp -p "$backup_dir/config.json" "$CONFIG_FILE"
+    [[ -f "$backup_dir/certs.tar.gz" ]] && tar -C "$CONFIG_DIR" -xzf "$backup_dir/certs.tar.gz" 2>/dev/null || true
     local image_to_use="$prev"
     if [[ -z "$image_to_use" || "$image_to_use" == "<no value>" ]]; then
         [[ -f "$backup_dir/image-name.txt" ]] && image_to_use="$(<"$backup_dir/image-name.txt")"
     fi
     [[ -z "$image_to_use" ]] && image_to_use="$DEFAULT_IMAGE"
-    print_info "rollback image: $image_to_use"
+    print_info "$(_t "rollback image: $image_to_use" "rollback image: $image_to_use")"
     if _docker_run "$image_to_use" "always"; then
         sleep 3
-        if verify_basic; then
-            print_ok "回滚成功"
-            return 0
-        fi
+        verify_basic && { print_ok "$(_t '回滚成功' 'Rollback succeeded')"; return 0; }
     fi
-    print_fail "回滚启动失败 — 容器状态请用 yunzes-node status / docker logs $NAME 查看"
+    print_fail "$(_t "回滚启动失败 — 容器状态请用 yunzes-node status / docker logs $NAME 查看" \
+                    "Rollback failed — check yunzes-node status / docker logs $NAME")"
     return 1
 }
 
 cmd_start() {
     if container_exists; then
         if container_running; then
-            print_info "$NAME 已经在运行"
+            print_info "$(_t "$NAME 已经在运行" "$NAME is already running")"
         else
             print_cmd "docker start $NAME"
-            docker start "$NAME" >/dev/null && print_ok "已启动" || print_fail "启动失败"
+            docker start "$NAME" >/dev/null && print_ok "$(_t '已启动' 'Started')" || print_fail "$(_t '启动失败' 'Start failed')"
         fi
     else
-        print_warn "容器不存在；执行 yunzes-node install 先安装"
+        print_warn "$(_t '容器不存在；执行 yunzes-node install 先安装' 'Container missing; run yunzes-node install first')"
     fi
 }
 
 cmd_stop() {
     if container_running; then
         print_cmd "docker stop $NAME"
-        docker stop "$NAME" >/dev/null && print_ok "已停止"
+        docker stop "$NAME" >/dev/null && print_ok "$(_t '已停止' 'Stopped')"
     else
-        print_info "$NAME 未在运行"
+        print_info "$(_t "$NAME 未在运行" "$NAME is not running")"
     fi
 }
 
 cmd_restart() {
     if container_exists; then
         print_cmd "docker restart $NAME"
-        docker restart "$NAME" >/dev/null && print_ok "已重启"
+        docker restart "$NAME" >/dev/null && print_ok "$(_t '已重启' 'Restarted')"
     else
-        print_warn "容器不存在"
+        print_warn "$(_t '容器不存在' 'Container missing')"
     fi
 }
 
 cmd_redeploy() {
     parse_flags "$@"
     if ! container_exists; then
-        print_warn "容器不存在；切换到 install"
+        print_warn "$(_t '容器不存在；切换到 install' 'Container missing; switching to install')"
         cmd_install "$@"
         return $?
     fi
+    validate_config || return 1
     local backup_dir
     backup_dir=$(backup_now)
-    print_ok "重新部署前备份: $backup_dir"
+    print_ok "$(_t "重新部署前备份: $backup_dir" "Pre-redeploy backup: $backup_dir")"
     print_cmd "docker rm -f $NAME"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     if ! _docker_run "$DEFAULT_IMAGE" "$RESTART_POLICY"; then
-        print_fail "启动失败，自动回滚"
+        print_fail "$(_t '启动失败，自动回滚' 'Start failed, auto-rollback')"
         _auto_rollback "$backup_dir" "$DEFAULT_IMAGE"
         return 1
     fi
-    sleep 3
-    cmd_verify || print_warn "verify 有未通过项"
+    sleep 4
+    cmd_verify || print_warn "$(_t 'verify 有未通过项' 'verify has issues')"
 }
 
 cmd_status() {
     if ! container_exists; then
-        print_info "$NAME 容器不存在"
+        print_info "$(_t "$NAME 容器不存在" "$NAME container missing")"
         return 0
     fi
-    print_info "以下为 docker ps 原始输出:"
+    print_info "$(_t '以下为 docker ps 原始输出:' 'Raw docker ps output below:')"
     docker ps -a --filter "name=^${NAME}$" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}"
     echo
-    print_info "以下为 docker stats 原始输出:"
+    print_info "$(_t '以下为 docker stats 原始输出:' 'Raw docker stats output below:')"
     docker stats --no-stream "$NAME" 2>/dev/null || true
 }
 
@@ -1240,54 +1357,58 @@ cmd_logs() {
         100|300) ;;
         ''|*[!0-9]*) n=100 ;;
     esac
-    print_info "以下为 docker logs --tail $n 原始输出:"
-    docker logs --tail "$n" "$NAME" 2>&1 || print_warn "容器不存在"
+    print_info "$(_t "以下为 docker logs --tail $n 原始输出:" "Raw docker logs --tail $n output below:")"
+    docker logs --tail "$n" "$NAME" 2>&1 || print_warn "$(_t '容器不存在' 'Container missing')"
 }
 
 cmd_follow_log() {
-    print_info "跟随 docker logs (Ctrl-C 退出):"
-    docker logs -f "$NAME" 2>&1 || print_warn "容器不存在"
+    print_info "$(_t '跟随 docker logs (Ctrl-C 退出):' 'Following docker logs (Ctrl-C to exit):')"
+    docker logs -f "$NAME" 2>&1 || print_warn "$(_t '容器不存在' 'Container missing')"
 }
 
 cmd_edit_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        print_warn "$CONFIG_FILE 不存在；先用 yunzes-node gen-config 生成"
+        print_warn "$(_t "$CONFIG_FILE 不存在；先用 yunzes-node gen-config 生成" "$CONFIG_FILE missing; run yunzes-node gen-config first")"
         return 1
     fi
     local editor="${EDITOR:-}"
     if [[ -z "$editor" ]]; then
         if   command -v nano >/dev/null 2>&1; then editor=nano
         elif command -v vi   >/dev/null 2>&1; then editor=vi
-        else print_fail "未找到 nano/vi，请设置 EDITOR 环境变量"; return 1
+        else print_fail "$(_t '未找到 nano/vi，请设置 EDITOR 环境变量' 'No nano/vi found; set the EDITOR env var')"; return 1
         fi
     fi
     local backup
     backup=$(backup_now)
-    print_info "已备份当前配置: $backup"
+    print_info "$(_t "已备份当前配置: $backup" "Backed up current config: $backup")"
     cp -p "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     print_cmd "$editor $CONFIG_FILE"
     "$editor" "$CONFIG_FILE"
     if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
-        print_fail "保存的 config.json 非合法 JSON; 恢复 .bak"
+        print_fail "$(_t '保存的 config.json 非合法 JSON; 恢复 .bak' 'Saved config.json invalid JSON; restoring .bak')"
         mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
         return 1
     fi
     rm -f "${CONFIG_FILE}.bak"
-    print_ok "JSON 校验通过"
-    if container_running && confirm "立即重启容器使配置生效" y; then
+    print_ok "$(_t 'JSON 校验通过' 'JSON syntax OK')"
+    if ! validate_config; then
+        print_warn "$(_t 'validate_config 报错；建议继续修复后再 restart' 'validate_config has FAIL; fix before restart')"
+        return 1
+    fi
+    if container_running && confirm "$(_t '立即重启容器使配置生效' 'Restart container now to apply')" y; then
         cmd_restart
     fi
 }
 
 cmd_show_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        print_warn "$CONFIG_FILE 不存在"
+        print_warn "$(_t "$CONFIG_FILE 不存在" "$CONFIG_FILE missing")"
         return 1
     fi
     if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
-        print_fail "config.json 非合法 JSON"; return 1
+        print_fail "$(_t 'config.json 非合法 JSON' 'config.json not valid JSON')"; return 1
     fi
-    print_info "以下为 config.json 内容，ApiKey 已隐藏:"
+    print_info "$(_t '以下为 config.json 内容，ApiKey 已隐藏:' 'config.json content (ApiKey masked):')"
     jq '
         .Nodes |= (map(
             if has("ApiKey") and (.ApiKey | type) == "string" and (.ApiKey | length) > 0 then
@@ -1317,8 +1438,8 @@ gen_config_template() {
             "CertConfig": {
                 "CertMode": "http",
                 "CertDomain": "node.example.com",
-                "CertFile":   "/etc/yunzes-node/certs/vless1.crt",
-                "KeyFile":    "/etc/yunzes-node/certs/vless1.key",
+                "CertFile":   "/etc/yunzes-node/certs/vless-1.crt",
+                "KeyFile":    "/etc/yunzes-node/certs/vless-1.key",
                 "Email":      "admin@example.com",
                 "Provider":   "",
                 "RenewBeforeDays": 30
@@ -1327,70 +1448,80 @@ gen_config_template() {
     ]
 }
 JSON
-    print_ok "已写入模板: $dest"
+    print_ok "$(_t "已写入模板: $dest" "Template written: $dest")"
 }
 
 cmd_gen_config() {
     ensure_dirs
-    if [[ -f "$CONFIG_FILE" ]] && ! confirm "$CONFIG_FILE 已存在，是否覆盖（会先备份）" n; then
+    if [[ -f "$CONFIG_FILE" ]] && ! confirm "$(_t "$CONFIG_FILE 已存在，是否覆盖（会先备份）" "$CONFIG_FILE exists — overwrite (with backup)")" n; then
         return 0
     fi
     [[ -f "$CONFIG_FILE" ]] && backup_now >/dev/null
     gen_config_template "$CONFIG_FILE"
-    if confirm "进入交互生成多节点配置" y; then
+    if confirm "$(_t '进入交互生成多节点配置' 'Enter multi-node interactive generation')" y; then
         gen_config_interactive
     fi
 }
 
+# gen_config_interactive: now enforces non-empty CertDomain when CertMode
+# requires it, defaulting to a node-keyed cert path with a hyphen separator
+# (vless-1.crt vs the previous vless1.crt) for readability.
 gen_config_interactive() {
-    print_info "进入交互式配置生成 — Ctrl-C 中途退出会保留模板状态"
+    print_info "$(_t '进入交互式配置生成 — Ctrl-C 中途退出会保留模板状态' 'Entering interactive generation — Ctrl-C exits early, template state preserved')"
     echo
     local nodes_json="[]"
     while true; do
         local idx
         idx=$(echo "$nodes_json" | jq 'length')
-        print_title "--- 添加节点 #${idx} ---"
+        print_title "$(_t "--- 添加节点 #${idx} ---" "--- Add node #${idx} ---")"
         local api_host api_key node_id node_type listen_ip timeout
         local cert_mode cert_domain cert_file key_file email
         api_host=$(prompt_read "ApiHost"      "https://your-panel.example.com")
-        api_key=$(prompt_read  "ApiKey"       "")
-        node_id=$(prompt_read  "NodeID (整数)" "1")
-        print_info "支持协议: vless / vmess / trojan / shadowsocks / hysteria2 / tuic / anytls"
-        node_type=$(prompt_read "NodeType"     "vless")
-        listen_ip=$(prompt_read "ListenIP"     "0.0.0.0")
-        timeout=$(prompt_read   "Timeout (秒)" "30")
+        api_key=$(prompt_required "ApiKey" \
+            "ApiKey 不能为空，否则 panel 调用全部 401" \
+            "ApiKey is required, otherwise all panel calls return 401")
+        node_id=$(prompt_read  "NodeID" "1")
+        print_info "$(_t '支持协议: vless / vmess / trojan / shadowsocks / hysteria2 / tuic / anytls' \
+                       'Supported protocols: vless / vmess / trojan / shadowsocks / hysteria2 / tuic / anytls')"
+        node_type=$(prompt_read "NodeType" "vless")
+        listen_ip=$(prompt_read "ListenIP" "0.0.0.0")
+        timeout=$(prompt_read   "Timeout"  "30")
 
         local need_tls=0
         case "$node_type" in
             hysteria2|tuic|anytls) need_tls=1 ;;
             vless|vmess|trojan)
-                if confirm "该协议是否启用 TLS (reality / 无加密回答 N)" y; then
+                if confirm "$(_t '该协议是否启用 TLS (reality / 无加密回答 N)' 'Enable TLS for this protocol (reply N for reality / cleartext)')" y; then
                     need_tls=1
-                fi
-                ;;
+                fi ;;
         esac
 
         local cert_obj="null"
         if (( need_tls )); then
-            print_info "CertMode 选项: http (ACME HTTP-01) / dns (ACME DNS-01) / file (你提供) / self (自签) / none"
+            print_info "$(_t 'CertMode 选项: http (ACME HTTP-01) / dns (ACME DNS-01) / file (你提供) / self (自签) / none' \
+                           'CertMode options: http / dns / file / self / none')"
             cert_mode=$(prompt_read "CertMode" "self")
             case "$cert_mode" in
                 http|dns|file|self)
-                    cert_domain=$(prompt_read "CertDomain"          "")
-                    cert_file=$(prompt_read   "CertFile"  "/etc/yunzes-node/certs/${node_type}${node_id}.crt")
-                    key_file=$(prompt_read    "KeyFile"   "/etc/yunzes-node/certs/${node_type}${node_id}.key")
+                    cert_domain=$(prompt_required "CertDomain" \
+                        "CertDomain 不能为空，否则 EnsureCertificate 会拒绝并触发容器 restart 循环。如需 cleartext，请改 CertMode 为 none。" \
+                        "CertDomain must be non-empty, otherwise EnsureCertificate rejects it and the container will restart-loop. For cleartext, set CertMode to none.")
+                    cert_file=$(prompt_read   "CertFile"  "/etc/yunzes-node/certs/${node_type}-${node_id}.crt")
+                    key_file=$(prompt_read    "KeyFile"   "/etc/yunzes-node/certs/${node_type}-${node_id}.key")
                     if [[ "$cert_mode" =~ ^(http|dns)$ ]]; then
-                        email=$(prompt_read "Email (ACME 注册用)" "")
+                        email=$(prompt_required "Email (ACME 注册用)" \
+                            "Email 不能为空（ACME 必填）" \
+                            "Email is required for ACME")
                     else
                         email=""
                     fi
                     cert_obj=$(jq -n \
                         --arg m "$cert_mode" --arg d "$cert_domain" \
                         --arg cf "$cert_file" --arg kf "$key_file" --arg e "$email" \
-                        '{CertMode:$m, CertDomain:$d, CertFile:$cf, KeyFile:$kf, Email:$e, RenewBeforeDays:30}')
-                    ;;
+                        '{CertMode:$m, CertDomain:$d, CertFile:$cf, KeyFile:$kf, Email:$e, RenewBeforeDays:30}') ;;
                 none|"") cert_obj='{"CertMode":"none"}' ;;
-                *) print_warn "未知 CertMode '$cert_mode'，回退到 none"; cert_obj='{"CertMode":"none"}' ;;
+                *) print_warn "$(_t "未知 CertMode '$cert_mode'，回退到 none" "Unknown CertMode '$cert_mode', falling back to none")"
+                   cert_obj='{"CertMode":"none"}' ;;
             esac
         else
             cert_obj='{"CertMode":"none"}'
@@ -1405,9 +1536,7 @@ gen_config_interactive() {
             '{ApiHost:$ah, ApiKey:$ak, NodeID:$nid, NodeType:$nt, Timeout:$tm, ListenIP:$lip, CertConfig:$cert}')
         nodes_json=$(echo "$nodes_json" | jq --argjson n "$node_json" '. + [$n]')
         echo
-        if ! confirm "继续添加下一个节点" n; then
-            break
-        fi
+        if ! confirm "$(_t '继续添加下一个节点' 'Add another node')" n; then break; fi
     done
 
     local final
@@ -1419,122 +1548,109 @@ gen_config_interactive() {
     if echo "$final" | jq empty 2>/dev/null; then
         echo "$final" > "$CONFIG_FILE"
         chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-        print_ok "已写入 $CONFIG_FILE"
+        print_ok "$(_t "已写入 $CONFIG_FILE" "Written: $CONFIG_FILE")"
+        # Run validate_config so the operator sees pass/fail right after gen.
+        validate_config || true
     else
-        print_fail "生成的 JSON 不合法 (脚本 bug, 请反馈)"
+        print_fail "$(_t '生成的 JSON 不合法 (脚本 bug, 请反馈)' 'Generated JSON invalid (script bug, please report)')"
         return 1
     fi
 }
 
 cmd_check_panel() {
-    [[ -f "$CONFIG_FILE" ]] || { print_fail "无 config.json"; return 1; }
-    jq empty "$CONFIG_FILE" 2>/dev/null || { print_fail "config.json 非合法 JSON"; return 1; }
-    local total
-    total=$(jq '.Nodes | length // 0' "$CONFIG_FILE")
-    local idx host node_id ntype path code
-    for ((idx=0; idx<total; idx++)); do
-        host=$(jq -r ".Nodes[$idx].ApiHost"  "$CONFIG_FILE")
-        node_id=$(jq -r ".Nodes[$idx].NodeID" "$CONFIG_FILE")
-        ntype=$(jq -r  ".Nodes[$idx].NodeType" "$CONFIG_FILE")
-        path="${host%/}/v1/server/config?protocol=${ntype}&server_id=${node_id}"
-        print_step "节点 #$idx → $path"
-        print_cmd  "curl -s --connect-timeout 5 $path"
-        code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "$path" || true)
-        case "$code" in
-            200) print_ok   "HTTP 200 — panel 返回节点配置" ;;
-            401|403) print_warn "HTTP $code — panel 拒绝 (ApiKey 可能错或权限不足)" ;;
-            404) print_warn "HTTP 404 — 节点 ID $node_id 不存在或路径不对" ;;
-            000|"") print_fail "无法连接 $host" ;;
-            *) print_info "HTTP $code (具体含义看 panel 文档)" ;;
-        esac
-    done
+    [[ -f "$CONFIG_FILE" ]] || { print_fail "$(_t '无 config.json' 'No config.json')"; return 1; }
+    jq empty "$CONFIG_FILE" 2>/dev/null || { print_fail "$(_t 'config.json 非合法 JSON' 'config.json not valid JSON')"; return 1; }
+    preflight_panel_check
 }
 
 cmd_ports() {
     if ! command -v ss >/dev/null 2>&1; then
-        print_fail "缺少 ss 命令; apt install -y iproute2"
+        print_fail "$(_t '缺少 ss 命令; apt install -y iproute2' 'ss missing; apt install -y iproute2')"
         return 1
     fi
     if container_running; then
         local pid
         pid=$(docker inspect --format '{{.State.Pid}}' "$NAME" 2>/dev/null || true)
-        print_info "yunzes-node PID = $pid (host network 下与宿主端口表合并)"
-        print_info "以下为 ss -lntup 过滤后的原始输出:"
+        print_info "$(_t "yunzes-node PID = $pid (host network 下与宿主端口表合并)" \
+                        "yunzes-node PID = $pid (host network shares the host listen table)")"
+        print_info "$(_t '以下为 ss -lntup 过滤后的原始输出:' 'Raw filtered ss -lntup output below:')"
         ss -lntup | awk -v p="$pid" 'NR==1 || $0 ~ p'
     else
-        print_warn "容器未运行 — 显示宿主当前所有监听"
+        print_warn "$(_t '容器未运行 — 显示宿主当前所有监听' 'Container not running — showing all host listeners')"
         ss -lntup
     fi
 }
 
 cmd_containers() {
-    print_info "以下为 docker ps 原始输出:"
+    print_info "$(_t '以下为 docker ps 原始输出:' 'Raw docker ps output below:')"
     docker ps -a --filter "name=^${NAME}$" --no-trunc
     echo
-    print_info "以下为 docker inspect 头 80 行原始输出:"
-    docker inspect "$NAME" 2>/dev/null | head -80 || print_warn "容器不存在"
+    print_info "$(_t '以下为 docker inspect 头 80 行原始输出:' 'Raw docker inspect head 80 lines below:')"
+    docker inspect "$NAME" 2>/dev/null | head -80 || print_warn "$(_t '容器不存在' 'Container missing')"
 }
 
 cmd_backup() {
     ensure_dirs
     local b
     b=$(backup_now)
-    print_ok "备份完成: $b"
-    print_info "以下为 ls -lh 原始输出:"
+    print_ok "$(_t "备份完成: $b" "Backup complete: $b")"
+    print_info "$(_t '以下为 ls -lh 原始输出:' 'Raw ls -lh output below:')"
     ls -lh "$b"
     echo
-    print_info "回滚命令: yunzes-node rollback (或菜单 18)"
+    print_info "$(_t '回滚命令: yunzes-node rollback (或菜单 18)' 'Rollback: yunzes-node rollback (or menu 18)')"
 }
 
 cmd_rollback() {
     local backups
     mapfile -t backups < <(list_backups)
     if (( ${#backups[@]} == 0 )); then
-        print_warn "没有可用的备份"
+        print_warn "$(_t '没有可用的备份' 'No backups available')"
         return 0
     fi
-    print_info "可回滚的备份:"
+    print_info "$(_t '可回滚的备份:' 'Available backups:')"
     local i
     for ((i=0; i<${#backups[@]}; i++)); do
         print_choice "$((i+1)))" "${backups[$i]}"
     done
-    print_choice "q)" "取消"
+    print_choice "q)" "$(_t '取消' 'Cancel')"
     local choice
-    choice=$(prompt_read "选择 [1-${#backups[@]}, q]" "q")
-    [[ "$choice" =~ ^[Qq]$ ]] && { print_info "已取消"; return 0; }
+    choice=$(prompt_read "$(_t "选择 [1-${#backups[@]}, q]" "Choose [1-${#backups[@]}, q]")" "q")
+    [[ "$choice" =~ ^[Qq]$ ]] && { print_info "$(_t '已取消' 'Cancelled')"; return 0; }
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#backups[@]} )); then
-        print_fail "无效选项"; return 1
+        print_fail "$(_t '无效选项' 'Invalid option')"; return 1
     fi
     local target="${backups[$((choice-1))]}"
-    print_danger "回滚到 $target — 将覆盖当前 config.json + certs/ + 容器"
-    print_warn   "此操作不可直接撤销, 但回滚前会自动再做一次安全备份"
-    if ! confirm "继续" n; then
-        print_info "已取消"; return 0
+    print_danger "$(_t "回滚到 $target — 将覆盖当前 config.json + certs/ + 容器" "Rollback to $target — will overwrite current config.json + certs/ + container")"
+    print_warn   "$(_t '此操作不可直接撤销, 但回滚前会自动再做一次安全备份' 'Not directly reversible, but a safety backup is taken first')"
+    if ! confirm "$(_t '继续' 'Continue')" n; then
+        print_info "$(_t '已取消' 'Cancelled')"; return 0
     fi
     local before
     before=$(backup_now)
-    print_info "当前状态已备份到 $before (rollback-before-保险)"
+    print_info "$(_t "当前状态已备份到 $before (rollback-before-保险)" "Current state backed up to $before (rollback-before safety)")"
     if restore_from_backup "$target"; then
         sleep 3
-        cmd_verify || print_warn "verify 有未通过项"
+        cmd_verify || print_warn "$(_t 'verify 有未通过项' 'verify has issues')"
     else
-        print_fail "回滚失败 — yunzes-node status 查看容器; $before 是回滚前的备份"
+        print_fail "$(_t "回滚失败 — yunzes-node status 查看容器; $before 是回滚前的备份" \
+                        "Rollback failed — check yunzes-node status; $before holds the pre-rollback state")"
         return 1
     fi
 }
 
 cmd_cleanup_images() {
-    print_info "悬空镜像 (dangling):"
+    print_info "$(_t '悬空镜像 (dangling):' 'Dangling images:')"
     docker images --filter "dangling=true" --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}"
     echo
-    print_danger "下面的清理操作会删除所有 dangling 镜像 (容器进行中的镜像不会被影响)"
-    if confirm "继续清理 dangling 镜像" n; then
+    print_danger "$(_t '下面的清理操作会删除所有 dangling 镜像 (容器进行中的镜像不会被影响)' \
+                      'Cleanup will delete all dangling images (in-use images are unaffected)')"
+    if confirm "$(_t '继续清理 dangling 镜像' 'Proceed with dangling-image prune')" n; then
         print_cmd "docker image prune -f"
         docker image prune -f
-        print_ok "清理完成"
+        print_ok "$(_t '清理完成' 'Cleanup complete')"
     fi
     echo
-    print_info "全部 yunzes-node 历史镜像 (含 untagged):"
+    print_info "$(_t '全部 yunzes-node 历史镜像 (含 untagged):' 'All historical yunzes-node images (incl. untagged):')"
     docker images --filter "reference=yunzes-node" --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
 }
 
@@ -1544,30 +1660,24 @@ cmd_cleanup_images() {
 write_fake_panel_py() {
     cat > "$FAKE_PANEL_FILE" <<'PYEOF'
 #!/usr/bin/env python3
-"""Fake panel for yunzes-node integration testing."""
 import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
-
 USERS = {"users": [
     {"id": 1, "uuid": "11111111-1111-1111-1111-111111111111", "speed_limit": 0, "device_limit": 0},
     {"id": 2, "uuid": "22222222-2222-2222-2222-222222222222", "speed_limit": 0, "device_limit": 0},
 ]}
 ALIVE = {"alive": {}}
 BASIC = {"push_interval": 30, "pull_interval": 60}
-
 NODE_TABLE = {
     ("vless", "101"): {"basic": BASIC, "protocol": "vless", "config": {
         "port": 8101, "transport": "tcp", "security": "tls",
-        "security_config": {"sni": "vless.test"},
-    }},
+        "security_config": {"sni": "vless.test"}}},
     ("shadowsocks", "102"): {"basic": BASIC, "protocol": "shadowsocks", "config": {
-        "port": 8102, "method": "aes-256-gcm",
-    }},
+        "port": 8102, "method": "aes-256-gcm"}},
     ("hysteria2", "103"): {"basic": BASIC, "protocol": "hysteria2", "config": {
         "port": 8103, "up_mbps": 100, "down_mbps": 100, "obfs_password": "obfs-secret",
-        "security_config": {"sni": "hy2.test"},
-    }},
+        "security_config": {"sni": "hy2.test"}}},
     ("vless", "104"): {"basic": BASIC, "protocol": "vless", "config": {
         "port": 8104, "transport": "tcp", "security": "reality",
         "security_config": {
@@ -1575,26 +1685,19 @@ NODE_TABLE = {
             "reality_server_addr": "www.cloudflare.com",
             "reality_server_port": 443,
             "reality_private_key": "wEbNI8QwM1XLgX-ucy7Qwp6msGmGCfSMQClC-VRjV3w",
-            "reality_short_id": "0123456789abcdef",
-        },
-    }},
+            "reality_short_id": "0123456789abcdef"}}},
 }
-
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, body, status=200):
         b = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(b)))
-        self.end_headers()
-        self.wfile.write(b)
+        self.send_response(status); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         u = urlparse(self.path); q = parse_qs(u.query)
         proto = q.get("protocol", [""])[0]; sid = q.get("server_id", [""])[0]
         if u.path == "/v1/server/config":
             cfg = NODE_TABLE.get((proto, sid))
-            if cfg is None:
-                return self._send_json({"error": f"no node for {proto}/{sid}"}, 404)
+            if cfg is None: return self._send_json({"error": f"no node for {proto}/{sid}"}, 404)
             return self._send_json(cfg)
         if u.path == "/v1/server/user":      return self._send_json(USERS)
         if u.path == "/v1/server/alivelist": return self._send_json(ALIVE)
@@ -1605,7 +1708,6 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json({"ok": True})
     def log_message(self, fmt, *args):
         sys.stderr.write("[fake_panel] %s\n" % (fmt % args))
-
 if __name__ == "__main__":
     HTTPServer(("127.0.0.1", 9999), Handler).serve_forever()
 PYEOF
@@ -1614,7 +1716,7 @@ PYEOF
 
 start_fake_panel() {
     if [[ -f "$FAKE_PANEL_PID_FILE" ]] && kill -0 "$(<"$FAKE_PANEL_PID_FILE")" 2>/dev/null; then
-        print_info "fake panel 已在运行 (PID $(<"$FAKE_PANEL_PID_FILE"))"
+        print_info "$(_t "fake panel 已在运行 (PID $(<"$FAKE_PANEL_PID_FILE"))" "fake panel already running (PID $(<"$FAKE_PANEL_PID_FILE"))")"
         return 0
     fi
     write_fake_panel_py
@@ -1623,18 +1725,14 @@ start_fake_panel() {
     echo $! > "$FAKE_PANEL_PID_FILE"
     sleep 1
     if curl -s --max-time 2 "http://127.0.0.1:${FAKE_PANEL_PORT}/v1/server/user" >/dev/null; then
-        print_ok "fake panel 启动成功 (PID $(<"$FAKE_PANEL_PID_FILE"))"
+        print_ok "$(_t "fake panel 启动成功 (PID $(<"$FAKE_PANEL_PID_FILE"))" "fake panel started (PID $(<"$FAKE_PANEL_PID_FILE"))")"
     else
-        print_fail "fake panel 启动失败 — 查看 $FAKE_PANEL_LOG_FILE"
+        print_fail "$(_t "fake panel 启动失败 — 查看 $FAKE_PANEL_LOG_FILE" "fake panel start failed — see $FAKE_PANEL_LOG_FILE")"
         return 1
     fi
 }
 
 write_fake_test_config() {
-    # Use a separate FAKE_CERTS_DIR so test certs do not collide with real
-    # /etc/yunzes-node/certs claims (C3 claimCertFiles forbids two distinct
-    # CertDomains pointing at the same file). FAKE_CERTS_DIR is created
-    # inside the host bind-mount so the container can write here too.
     cat > "$FAKE_TEST_CONFIG" <<JSON
 {
     "Log": {"Level": "debug"},
@@ -1693,26 +1791,24 @@ JSON
 
 cmd_fake_test() {
     parse_flags "$@"
-    # Default for fake-test: --restart no, regardless of --no-restart flag,
-    # so a panic doesn't trigger restart loops that pollute logs.
     local effective_restart="no"
 
     if ! command -v python3 >/dev/null 2>&1; then
-        print_fail "缺少 python3 — apt install -y python3"
+        print_fail "$(_t '缺少 python3 — apt install -y python3' 'python3 missing — apt install -y python3')"
         return 1
     fi
     if ! command -v curl >/dev/null 2>&1; then
-        print_fail "缺少 curl"; return 1
+        print_fail "$(_t '缺少 curl' 'curl missing')"; return 1
     fi
     detect_docker_state >/dev/null
     case $? in
         0) ;;
-        10) print_fail "Docker 未安装"; return 1 ;;
-        11) print_fail "Docker daemon 未运行"; return 1 ;;
-        12) print_fail "无 docker socket 权限"; return 1 ;;
+        10) print_fail "$(_t 'Docker 未安装' 'Docker not installed')"; return 1 ;;
+        11) print_fail "$(_t 'Docker daemon 未运行' 'Docker daemon not running')"; return 1 ;;
+        12) print_fail "$(_t '无 docker socket 权限' 'No docker socket permission')"; return 1 ;;
     esac
     if ! docker image inspect "$DEFAULT_IMAGE" >/dev/null 2>&1; then
-        print_fail "镜像 $DEFAULT_IMAGE 不存在; 先 yunzes-node install 或 docker build"
+        print_fail "$(_t "镜像 $DEFAULT_IMAGE 不存在; 先 yunzes-node install 或 docker build" "Image $DEFAULT_IMAGE missing; run yunzes-node install or docker build first")"
         return 1
     fi
 
@@ -1720,31 +1816,29 @@ cmd_fake_test() {
     mkdir -p "$FAKE_CERTS_DIR"
     chmod 750 "$FAKE_CERTS_DIR" 2>/dev/null || true
 
-    # Save original config; track exact backup dir for the cleanup phase.
     local pre_backup=""
     if [[ -f "$CONFIG_FILE" ]]; then
         pre_backup=$(backup_now)
-        print_info "fake-test 前已备份原配置: $pre_backup"
+        print_info "$(_t "fake-test 前已备份原配置: $pre_backup" "Pre-fake-test backup: $pre_backup")"
     fi
     write_fake_test_config
     cp -f "$FAKE_TEST_CONFIG" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
-    print_ok "已写入 4 协议测试配置 → $CONFIG_FILE"
+    print_ok "$(_t "已写入 4 协议测试配置 → $CONFIG_FILE" "Wrote 4-protocol test config → $CONFIG_FILE")"
 
     start_fake_panel || return 1
 
     print_cmd "docker rm -f $NAME"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
-    print_step "启动测试容器 (restart=$effective_restart)"
+    print_step "$(_t "启动测试容器 (restart=$effective_restart)" "Starting test container (restart=$effective_restart)")"
     if ! _docker_run "$DEFAULT_IMAGE" "$effective_restart"; then
-        print_fail "测试容器启动失败"
-        # Restore prior config on early failure.
+        print_fail "$(_t '测试容器启动失败' 'Test container start failed')"
         [[ -n "$pre_backup" && -f "$pre_backup/config.json" ]] \
             && cp -p "$pre_backup/config.json" "$CONFIG_FILE"
         return 1
     fi
 
-    print_step "等待 5 秒..."; sleep 5
+    print_step "$(_t '等待 5 秒...' 'Waiting 5s...')"; sleep 5
     echo
 
     local logs fake_pass=0 fake_fail=0
@@ -1753,25 +1847,25 @@ cmd_fake_test() {
     local _bad
     _bad=$(echo "$logs" | grep -E -i 'panic|nil pointer|runtime error|segmentation violation' | head -3 || true)
     if [[ -z "$_bad" ]]; then
-        print_ok "无 panic / nil pointer / runtime error"; fake_pass=$((fake_pass+1))
+        print_ok "$(_t '无 panic / nil pointer / runtime error' 'No panic / nil pointer / runtime error')"; fake_pass=$((fake_pass+1))
     else
-        print_fail "发现致命错误:"
-        print_info "以下为匹配到的原始日志行:"
+        print_fail "$(_t '发现致命错误:' 'Fatal error found:')"
+        print_info "$(_t '以下为匹配到的原始日志行:' 'Matching raw log lines:')"
         echo "$_bad" | sed 's/^/      /'
         fake_fail=$((fake_fail+1))
     fi
     local marker
     for marker in "Core Selector" "Adding node inbound" "logical_tag" "core=" "runtime_key" "protocol=" "server_id" "port="; do
         if echo "$logs" | grep -qF "$marker"; then
-            print_ok "日志含字段: $marker"; fake_pass=$((fake_pass+1))
+            print_ok "$(_t "日志含字段: $marker" "log contains: $marker")"; fake_pass=$((fake_pass+1))
         else
-            print_fail "日志未见: $marker"; fake_fail=$((fake_fail+1))
+            print_fail "$(_t "日志未见: $marker" "log missing: $marker")"; fake_fail=$((fake_fail+1))
         fi
     done
 
     if command -v ss >/dev/null 2>&1; then
         echo
-        print_step "端口监听检查 (host network)"
+        print_step "$(_t '端口监听检查 (host network)' 'Listen check (host network)')"
         local check port proto hits
         for check in "8101 tcp" "8102 tcp" "8102 udp" "8103 udp" "8104 tcp"; do
             read -r port proto <<<"$check"
@@ -1780,64 +1874,65 @@ cmd_fake_test() {
                 udp) hits=$(ss -lnup 2>/dev/null | awk -v p=":$port" '$4 ~ p"$"' || true) ;;
             esac
             if [[ -n "$hits" ]] && echo "$hits" | grep -q yunzes-node; then
-                print_ok "$port/$proto 由 yunzes-node 监听"; fake_pass=$((fake_pass+1))
+                print_ok "$(_t "$port/$proto 由 yunzes-node 监听" "$port/$proto owned by yunzes-node")"; fake_pass=$((fake_pass+1))
             else
-                print_fail "$port/$proto 未由 yunzes-node 监听"; fake_fail=$((fake_fail+1))
+                print_fail "$(_t "$port/$proto 未由 yunzes-node 监听" "$port/$proto NOT owned by yunzes-node")"; fake_fail=$((fake_fail+1))
             fi
         done
     else
-        print_warn "缺少 ss, 跳过端口监听检查"
+        print_warn "$(_t '缺少 ss, 跳过端口监听检查' 'ss missing, skipping listen check')"
     fi
 
     echo
-    print_step "证书复用检查 (restart 后应 reuse)"
+    print_step "$(_t '证书复用检查 (restart 后应 reuse)' 'Cert reuse check (restart should reuse)')"
     print_cmd "docker restart $NAME"
     docker restart "$NAME" >/dev/null 2>&1 || true
     sleep 3
     local cert_lines
     cert_lines=$(docker logs --tail 200 "$NAME" 2>&1 | grep cert_action || true)
     if echo "$cert_lines" | grep -q 'cert_action=reuse'; then
-        print_ok "重启后 cert_action=reuse (C3 持久化生效)"; fake_pass=$((fake_pass+1))
+        print_ok "$(_t '重启后 cert_action=reuse (C3 持久化生效)' 'cert_action=reuse after restart (C3 persistence works)')"; fake_pass=$((fake_pass+1))
     else
-        print_warn "未在重启日志里找到 cert_action=reuse"
-        print_info "以下为 cert_action 相关日志原文:"
+        print_warn "$(_t '未在重启日志里找到 cert_action=reuse' 'cert_action=reuse not seen in restart logs')"
+        print_info "$(_t '以下为 cert_action 相关日志原文:' 'cert_action raw lines below:')"
         echo "$cert_lines" | sed 's/^/      /'
     fi
 
     echo
     print_separator
-    printf "fake-test 汇总: %bPASS=%d%b  %bFAIL=%d%b\n" \
+    printf "$(_t 'fake-test 汇总:' 'fake-test summary:') %bPASS=%d%b  %bFAIL=%d%b\n" \
         "${C_GREEN}" "$fake_pass" "${C_PLAIN}" "${C_RED}" "$fake_fail" "${C_PLAIN}"
     print_separator
 
     echo
-    if confirm "停止 fake panel" y; then
+    if confirm "$(_t '停止 fake panel' 'Stop fake panel')" y; then
         cmd_stop_fake_panel
     fi
-    if confirm "删除测试容器 ($NAME)" n; then
+    if confirm "$(_t "删除测试容器 ($NAME)" "Delete test container ($NAME)")" n; then
         print_cmd "docker rm -f $NAME"
         docker rm -f "$NAME" >/dev/null 2>&1 || true
-        print_ok "测试容器已删除"
+        print_ok "$(_t '测试容器已删除' 'Test container deleted')"
     fi
-    if confirm "保留测试证书 ($FAKE_CERTS_DIR)" n; then
-        print_info "保留 — 测试证书隔离在 $FAKE_CERTS_DIR, 不影响真实 $CERTS_DIR"
+    if confirm "$(_t "保留测试证书 ($FAKE_CERTS_DIR)" "Keep test certs ($FAKE_CERTS_DIR)")" n; then
+        print_info "$(_t "保留 — 测试证书隔离在 $FAKE_CERTS_DIR, 不影响真实 $CERTS_DIR" \
+                        "Keeping — test certs isolated under $FAKE_CERTS_DIR; real $CERTS_DIR untouched")"
     else
         print_cmd "rm -rf $FAKE_CERTS_DIR"
         rm -rf "$FAKE_CERTS_DIR"
-        print_ok "测试证书目录已删除"
+        print_ok "$(_t '测试证书目录已删除' 'Test cert dir deleted')"
     fi
     echo
     if [[ -n "$pre_backup" ]]; then
-        if confirm "恢复 fake-test 之前的 config.json (来自 $pre_backup)" y; then
+        if confirm "$(_t "恢复 fake-test 之前的 config.json (来自 $pre_backup)" "Restore pre-fake-test config.json (from $pre_backup)")" y; then
             if [[ -f "$pre_backup/config.json" ]]; then
                 cp -p "$pre_backup/config.json" "$CONFIG_FILE"
-                print_ok "已恢复: $pre_backup/config.json"
+                print_ok "$(_t "已恢复: $pre_backup/config.json" "Restored: $pre_backup/config.json")"
             else
-                print_warn "$pre_backup/config.json 不存在; 保留测试 config.json"
+                print_warn "$(_t "$pre_backup/config.json 不存在; 保留测试 config.json" "$pre_backup/config.json missing; keeping test config.json")"
             fi
         fi
     else
-        print_info "fake-test 启动前没有 config.json, 无需恢复"
+        print_info "$(_t 'fake-test 启动前没有 config.json, 无需恢复' 'No prior config.json, nothing to restore')"
     fi
     return $fake_fail
 }
@@ -1848,7 +1943,7 @@ cmd_stop_fake_panel() {
         pid=$(<"$FAKE_PANEL_PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             print_cmd "kill $pid"
-            kill "$pid" 2>/dev/null && print_ok "fake panel 已停止 (PID $pid)"
+            kill "$pid" 2>/dev/null && print_ok "$(_t "fake panel 已停止 (PID $pid)" "fake panel stopped (PID $pid)")"
         fi
         rm -f "$FAKE_PANEL_PID_FILE"
     fi
@@ -1859,43 +1954,43 @@ cmd_stop_fake_panel() {
 # Uninstall
 # -----------------------------------------------------------------------------
 cmd_uninstall() {
-    print_danger "卸载操作: 将删除容器并可选删除镜像 / 全局命令"
-    print_warn   "保留: $CONFIG_DIR (含证书) 与 $BACKUP_DIR (备份)"
-    if ! confirm "继续" y; then
-        print_info "已取消"
+    print_danger "$(_t '卸载操作: 将删除容器并可选删除镜像 / 全局命令' 'Uninstall: deletes container, optionally image / global cmd')"
+    print_warn   "$(_t "保留: $CONFIG_DIR (含证书) 与 $BACKUP_DIR (备份)" "Preserved: $CONFIG_DIR (incl. certs) and $BACKUP_DIR (backups)")"
+    if ! confirm "$(_t '继续' 'Continue')" y; then
+        print_info "$(_t '已取消' 'Cancelled')"
         return 0
     fi
     if container_exists; then
         print_cmd "docker rm -f $NAME"
         docker rm -f "$NAME" >/dev/null 2>&1 || true
-        print_ok "容器已删除"
+        print_ok "$(_t '容器已删除' 'Container deleted')"
     fi
     if docker image inspect "$DEFAULT_IMAGE" >/dev/null 2>&1; then
-        if confirm "同时删除镜像 $DEFAULT_IMAGE" n; then
+        if confirm "$(_t "同时删除镜像 $DEFAULT_IMAGE" "Also delete image $DEFAULT_IMAGE")" n; then
             print_cmd "docker rmi -f $DEFAULT_IMAGE"
-            docker rmi -f "$DEFAULT_IMAGE" >/dev/null 2>&1 && print_ok "镜像已删除"
+            docker rmi -f "$DEFAULT_IMAGE" >/dev/null 2>&1 && print_ok "$(_t '镜像已删除' 'Image deleted')"
         fi
     fi
-    if [[ -f "$INSTALLED_PATH" ]] && confirm "删除全局命令 $INSTALLED_PATH" n; then
+    if [[ -f "$INSTALLED_PATH" ]] && confirm "$(_t "删除全局命令 $INSTALLED_PATH" "Delete global command $INSTALLED_PATH")" n; then
         rm -f "$INSTALLED_PATH"
-        print_ok "$INSTALLED_PATH 已删除"
+        print_ok "$(_t "$INSTALLED_PATH 已删除" "$INSTALLED_PATH deleted")"
     fi
-    print_info "保留: $CONFIG_DIR  $CERTS_DIR  $BACKUP_DIR"
-    print_info "如需彻底清理: yunzes-node uninstall-full"
+    print_info "$(_t "保留: $CONFIG_DIR  $CERTS_DIR  $BACKUP_DIR" "Kept: $CONFIG_DIR  $CERTS_DIR  $BACKUP_DIR")"
+    print_info "$(_t '如需彻底清理: yunzes-node uninstall-full' 'For full wipe: yunzes-node uninstall-full')"
 }
 
 cmd_uninstall_full() {
-    print_danger "危险操作: 完全卸载 — 将删除以下所有内容"
-    print_fail   "  - 容器        $NAME"
-    print_fail   "  - 镜像        $DEFAULT_IMAGE"
-    print_fail   "  - 配置目录    $CONFIG_DIR (含证书 + fake-test 证书)"
-    print_fail   "  - 运行目录    $RUN_DIR (含全部备份 + 源码 $SRC_DIR)"
-    print_fail   "  - 命令入口    $INSTALLED_PATH"
-    print_warn   "此操作不可恢复"
-    print_fix    "如需取消, 直接回车或输入除 'DELETE YUNZES NODE' 之外的任何文字"
+    print_danger "$(_t '危险操作: 完全卸载 — 将删除以下所有内容' 'DANGER: full uninstall — will delete everything below')"
+    print_fail   "$(_t "  - 容器        $NAME" "  - container   $NAME")"
+    print_fail   "$(_t "  - 镜像        $DEFAULT_IMAGE" "  - image       $DEFAULT_IMAGE")"
+    print_fail   "$(_t "  - 配置目录    $CONFIG_DIR (含证书 + fake-test 证书)" "  - config dir  $CONFIG_DIR (incl. certs + fake-test certs)")"
+    print_fail   "$(_t "  - 运行目录    $RUN_DIR (含全部备份 + 源码 $SRC_DIR)" "  - run dir     $RUN_DIR (incl. all backups + source $SRC_DIR)")"
+    print_fail   "$(_t "  - 命令入口    $INSTALLED_PATH" "  - global cmd  $INSTALLED_PATH")"
+    print_warn   "$(_t '此操作不可恢复' 'This is NOT reversible')"
+    print_fix    "$(_t "如需取消, 直接回车或输入除 'DELETE YUNZES NODE' 之外的任何文字" "To cancel, press Enter or type anything other than 'DELETE YUNZES NODE'")"
     echo
-    if ! confirm_phrase "请输入 DELETE YUNZES NODE 二次确认" "DELETE YUNZES NODE"; then
-        print_info "已取消"
+    if ! confirm_phrase "$(_t '请输入 DELETE YUNZES NODE 二次确认' 'Type DELETE YUNZES NODE to confirm')" "DELETE YUNZES NODE"; then
+        print_info "$(_t '已取消' 'Cancelled')"
         return 0
     fi
     cmd_stop_fake_panel
@@ -1910,46 +2005,47 @@ cmd_uninstall_full() {
     print_cmd "rm -rf $CONFIG_DIR $RUN_DIR $INSTALLED_PATH"
     rm -rf "$CONFIG_DIR" "$RUN_DIR"
     rm -f "$INSTALLED_PATH"
-    print_ok "彻底卸载完成"
+    print_ok "$(_t '彻底卸载完成' 'Full uninstall complete')"
 }
 
 cmd_setup_entry() {
     if ! is_root; then
-        print_fail "需 root 才能写 $INSTALLED_PATH"
+        print_fail "$(_t "需 root 才能写 $INSTALLED_PATH" "Need root to write $INSTALLED_PATH")"
         return 1
     fi
     if [[ ! -f "$SCRIPT_PATH" ]]; then
-        print_fail "找不到当前脚本路径: $SCRIPT_PATH"
+        print_fail "$(_t "找不到当前脚本路径: $SCRIPT_PATH" "Script path not found: $SCRIPT_PATH")"
         return 1
     fi
     print_cmd "install -m 0755 $SCRIPT_PATH $INSTALLED_PATH"
     install -m 0755 "$SCRIPT_PATH" "$INSTALLED_PATH"
-    print_ok "命令已安装 / 更新: $INSTALLED_PATH"
-    print_info "现在直接 yunzes-node 即可进入菜单"
+    print_ok "$(_t "命令已安装 / 更新: $INSTALLED_PATH" "Command installed / updated: $INSTALLED_PATH")"
+    print_info "$(_t '现在直接 yunzes-node 即可进入菜单' 'Now `yunzes-node` enters the menu')"
 }
 
 # -----------------------------------------------------------------------------
 # Top-level dispatcher
 # -----------------------------------------------------------------------------
 usage() {
-    print_title "yunzes-node v${SCRIPT_VERSION}  —  单容器双核心 Docker 部署"
+    print_title "yunzes-node v${SCRIPT_VERSION}  —  $(_t '单容器双核心 Docker 部署' 'Single-container dual-core Docker deployment')"
     print_separator
     cat <<EOF
 
-用法:
-    yunzes-node                       # 进入交互菜单
-    yunzes-node menu                  # 同上
+$(_t '用法' 'Usage'):
+    yunzes-node                       # $(_t '进入交互菜单' 'enter interactive menu')
+    yunzes-node menu                  # $(_t '同上' 'same as above')
     yunzes-node install [--no-restart]
-    yunzes-node update                # 同 upgrade
+    yunzes-node update                # $(_t '同 upgrade' 'alias of upgrade')
     yunzes-node upgrade
     yunzes-node start | stop | restart
     yunzes-node redeploy [--no-restart]
     yunzes-node status
-    yunzes-node logs                  # 最近 100 行
+    yunzes-node logs                  # $(_t '最近 100 行' 'last 100 lines')
     yunzes-node follow-log
-    yunzes-node verify                # 三级验证
+    yunzes-node verify                # $(_t '三级验证' '3-tier verify')
+    yunzes-node validate-config       # $(_t 'JSON + 业务字段体检' 'JSON + semantic validation')
     yunzes-node edit-config
-    yunzes-node show-config           # 自动隐藏 ApiKey
+    yunzes-node show-config           # $(_t '自动隐藏 ApiKey' 'ApiKey masked automatically')
     yunzes-node gen-config
     yunzes-node check-panel
     yunzes-node ports
@@ -1961,20 +2057,21 @@ usage() {
     yunzes-node stop-fake-panel
     yunzes-node uninstall
     yunzes-node uninstall-full
-    yunzes-node setup-entry           # 安装到 ${INSTALLED_PATH}
+    yunzes-node setup-entry           # $(_t "安装到 ${INSTALLED_PATH}" "install to ${INSTALLED_PATH}")
 
-环境变量:
-    NO_COLOR=1                      关闭彩色输出 (适合日志采集 / CI)
+$(_t '环境变量' 'Environment variables'):
+    NO_COLOR=1                      $(_t '关闭彩色输出 (适合日志采集 / CI)' 'disable colors (logs / CI)')
+    YUNZES_LANG=zh|en               $(_t '强制语言 (默认依 LANG 自动)' 'force language (default auto from LANG)')
 
-路径约定:
-    配置  ${CONFIG_FILE}
-    证书  ${CERTS_DIR}
-    fake  ${FAKE_CERTS_DIR}
-    备份  ${BACKUP_DIR}
-    源码  ${SRC_DIR}
-    日志  docker logs ${NAME}
+$(_t '路径约定' 'Paths'):
+    $(_t '配置' 'config')   ${CONFIG_FILE}
+    $(_t '证书' 'certs')   ${CERTS_DIR}
+    fake               ${FAKE_CERTS_DIR}
+    $(_t '备份' 'backup')  ${BACKUP_DIR}
+    $(_t '源码' 'source')  ${SRC_DIR}
+    $(_t '日志' 'logs')    docker logs ${NAME}
 
-详见 README.md。
+$(_t '详见 README.md。' 'See README.md for details.')
 EOF
 }
 
@@ -1987,7 +2084,7 @@ main() {
     case "$cmd" in
         install|update|upgrade|redeploy|edit-config|gen-config|backup|rollback|fake-test|uninstall|uninstall-full|setup-entry)
             if ! is_root; then
-                print_fail "请使用 root 运行: sudo $SCRIPT_PATH $cmd $*"
+                print_fail "$(_t "请使用 root 运行: sudo $SCRIPT_PATH $cmd $*" "Run as root: sudo $SCRIPT_PATH $cmd $*")"
                 exit 1
             fi
             ;;
@@ -2005,6 +2102,7 @@ main() {
         logs)            cmd_logs "${1:-100}" ;;
         follow-log)      cmd_follow_log ;;
         verify)          cmd_verify ;;
+        validate-config) validate_config ;;
         edit-config)     cmd_edit_config ;;
         show-config)     cmd_show_config ;;
         gen-config)      cmd_gen_config ;;
@@ -2020,7 +2118,7 @@ main() {
         uninstall-full)  cmd_uninstall_full ;;
         setup-entry)     cmd_setup_entry ;;
         precheck)        precheck "$@" ;;
-        version|-v|--version) print_info "yunzes-node script v${SCRIPT_VERSION}" ;;
+        version|-v|--version) print_info "yunzes-node script v${SCRIPT_VERSION} ($(_t 'locale' 'locale')=${LOCALE})" ;;
         help|-h|--help)  usage ;;
         *)               usage; exit 1 ;;
     esac
