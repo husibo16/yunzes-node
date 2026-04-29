@@ -43,15 +43,25 @@ sudo yunzes-node uninstall-full        # 全清；要求二次输入 "DELETE YUN
 
 **国际化 (中文 / English)**
 
-默认中文。设 `YUNZES_LANG=en` 切英文，或脚本根据 `LANG` 自动判断（`LANG=en_US.UTF-8 → en`，其它 → zh）。
+**默认中文。** 脚本不看 `LANG`（绝大多数 VPS 镜像都默认 `LANG=en_US.UTF-8`，但那不代表用户偏好英文）。三种切语言方式：
 
 ```bash
-YUNZES_LANG=en sudo yunzes-node            # 全英文菜单
-YUNZES_LANG=zh sudo yunzes-node verify      # 强制中文（即便 LANG=en）
-LANG=en_US.UTF-8 sudo yunzes-node           # 自动英文
+# 1) 一次性切（环境变量优先级最高）
+YUNZES_LANG=en sudo yunzes-node menu
+YUNZES_LANG=zh sudo yunzes-node verify       # 即便已经 lang en 持久了，本次仍 zh
+
+# 2) 持久切（写到 /opt/yunzes-node/state/locale，所有后续运行都生效）
+sudo yunzes-node lang en                    # 切英文
+sudo yunzes-node lang zh                    # 切回中文
+sudo yunzes-node lang reset                 # 删除偏好文件，恢复默认（zh）
+
+# 3) 仅查看
+yunzes-node lang                             # 不需要 root
 ```
 
-每条 print_* 输出都通过内联的 `_t "中文" "English"` 翻译；维护时双语版本紧贴在一起便于审核。
+优先级：`YUNZES_LANG` env > `/opt/yunzes-node/state/locale` 文件 > 默认 `zh`。
+
+每条 `print_*` 输出都通过内联的 `_t "中文" "English"` 翻译；维护时双语版本紧贴在一起便于审核。
 
 **彩色输出与 NO_COLOR**
 

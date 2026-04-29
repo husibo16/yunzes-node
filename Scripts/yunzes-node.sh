@@ -20,7 +20,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -41,16 +41,29 @@ readonly FAKE_PANEL_PORT=9999
 readonly FAKE_TEST_CONFIG="/tmp/yunzes-fake-config.json"
 
 # -----------------------------------------------------------------------------
-# Locale: $YUNZES_LANG wins; otherwise infer from LANG. Default zh.
+# Locale resolution order (first match wins):
+#   1. $YUNZES_LANG (explicit, one-shot override)
+#   2. /opt/yunzes-node/state/locale (persistent operator choice via
+#      `yunzes-node lang zh|en`)
+#   3. default zh
+#
+# We intentionally DO NOT consult $LANG here — most VPS images ship with
+# LANG=en_US.UTF-8 by default, which has nothing to do with the operator's
+# language preference. Use `yunzes-node lang en` to opt in.
 # -----------------------------------------------------------------------------
+LOCALE_STATE_FILE="/opt/yunzes-node/state/locale"
 if [[ -n "${YUNZES_LANG:-}" ]]; then
     case "${YUNZES_LANG,,}" in
         zh*) LOCALE=zh ;;
         en*) LOCALE=en ;;
         *)   LOCALE=zh ;;
     esac
-elif [[ "${LANG:-}" =~ ^en ]]; then
-    LOCALE=en
+elif [[ -r "$LOCALE_STATE_FILE" ]]; then
+    case "$(tr -d '[:space:]' < "$LOCALE_STATE_FILE" 2>/dev/null)" in
+        zh) LOCALE=zh ;;
+        en) LOCALE=en ;;
+        *)  LOCALE=zh ;;
+    esac
 else
     LOCALE=zh
 fi
@@ -2008,6 +2021,56 @@ cmd_uninstall_full() {
     print_ok "$(_t '彻底卸载完成' 'Full uninstall complete')"
 }
 
+cmd_lang() {
+    # Persist locale to LOCALE_STATE_FILE. Resets are also supported.
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        print_info "$(_t "当前 locale: $LOCALE" "Current locale: $LOCALE")"
+        if [[ -f "$LOCALE_STATE_FILE" ]]; then
+            print_info "$(_t "持久化偏好: $(<"$LOCALE_STATE_FILE")  (来自 $LOCALE_STATE_FILE)" \
+                            "Persisted preference: $(<"$LOCALE_STATE_FILE")  (from $LOCALE_STATE_FILE)")"
+        else
+            print_info "$(_t "未设置持久偏好（默认中文）；用 yunzes-node lang en 切换并保存" \
+                            "No persisted preference (default zh); use 'yunzes-node lang en' to switch and persist")"
+        fi
+        if [[ -n "${YUNZES_LANG:-}" ]]; then
+            print_warn "$(_t "本次环境变量 YUNZES_LANG=$YUNZES_LANG 覆盖了持久偏好" \
+                            "YUNZES_LANG=$YUNZES_LANG is overriding the persisted preference for this run")"
+        fi
+        return 0
+    fi
+    if ! is_root; then
+        print_fail "$(_t "需要 root 才能写 $LOCALE_STATE_FILE" "Need root to write $LOCALE_STATE_FILE")"
+        return 1
+    fi
+    case "$target" in
+        zh|cn|chinese|中文)
+            mkdir -p "$STATE_DIR"
+            echo "zh" > "$LOCALE_STATE_FILE"
+            print_ok "$(_t "已切换到中文（持久化到 $LOCALE_STATE_FILE）" "Switched to Chinese (persisted to $LOCALE_STATE_FILE)")"
+            ;;
+        en|english|英文)
+            mkdir -p "$STATE_DIR"
+            echo "en" > "$LOCALE_STATE_FILE"
+            print_ok "$(_t "Switched to English (persisted to $LOCALE_STATE_FILE)" "Switched to English (persisted to $LOCALE_STATE_FILE)")"
+            ;;
+        reset|default|清空)
+            if [[ -f "$LOCALE_STATE_FILE" ]]; then
+                rm -f "$LOCALE_STATE_FILE"
+                print_ok "$(_t "已重置为默认（中文）" "Reset to default (Chinese)")"
+            else
+                print_info "$(_t "已经是默认状态（中文）" "Already default (Chinese)")"
+            fi
+            ;;
+        *)
+            print_fail "$(_t "未知 locale: $target （支持: zh / en / reset）" "Unknown locale: $target (supported: zh / en / reset)")"
+            return 1
+            ;;
+    esac
+    print_info "$(_t "下次任意运行 yunzes-node 都会按新偏好显示；用 YUNZES_LANG=zh|en 可一次性覆盖" \
+                    "All future yunzes-node runs will use the new preference; use YUNZES_LANG=zh|en for one-shot override")"
+}
+
 cmd_setup_entry() {
     if ! is_root; then
         print_fail "$(_t "需 root 才能写 $INSTALLED_PATH" "Need root to write $INSTALLED_PATH")"
@@ -2058,10 +2121,17 @@ $(_t '用法' 'Usage'):
     yunzes-node uninstall
     yunzes-node uninstall-full
     yunzes-node setup-entry           # $(_t "安装到 ${INSTALLED_PATH}" "install to ${INSTALLED_PATH}")
+    yunzes-node lang [zh|en|reset]    # $(_t "查看或持久化语言偏好（不传参 = 仅查看）" "show / persist language preference (no arg = show)")
 
 $(_t '环境变量' 'Environment variables'):
     NO_COLOR=1                      $(_t '关闭彩色输出 (适合日志采集 / CI)' 'disable colors (logs / CI)')
-    YUNZES_LANG=zh|en               $(_t '强制语言 (默认依 LANG 自动)' 'force language (default auto from LANG)')
+    YUNZES_LANG=zh|en               $(_t '一次性强制语言（覆盖持久偏好）' 'one-shot language override (beats persisted preference)')
+
+$(_t '语言' 'Locale'):
+    $(_t '默认中文。' 'Default is Chinese.') $(_t '持久切换：' 'Persist switch:') yunzes-node lang en
+    $(_t '一次性切换：' 'One-shot:') YUNZES_LANG=en yunzes-node menu
+    $(_t '查看当前：' 'Show current:') yunzes-node lang
+    $(_t '配置文件：' 'State file:') /opt/yunzes-node/state/locale
 
 $(_t '路径约定' 'Paths'):
     $(_t '配置' 'config')   ${CONFIG_FILE}
@@ -2117,6 +2187,7 @@ main() {
         uninstall)       cmd_uninstall ;;
         uninstall-full)  cmd_uninstall_full ;;
         setup-entry)     cmd_setup_entry ;;
+        lang)            cmd_lang "${1:-}" ;;
         precheck)        precheck "$@" ;;
         version|-v|--version) print_info "yunzes-node script v${SCRIPT_VERSION} ($(_t 'locale' 'locale')=${LOCALE})" ;;
         help|-h|--help)  usage ;;
