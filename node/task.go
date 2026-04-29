@@ -12,6 +12,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// renewCertTask is the periodic hook scheduled by startTasks. It defers all
+// lifecycle decisions to EnsureCertificate, which stat+parses the on-disk
+// cert and decides whether to issue, renew, reuse, or reissue.
+func (c *Controller) renewCertTask() error {
+	le := log.WithFields(c.logFields())
+	if _, err := EnsureCertificate(c.CertConfig, le); err != nil {
+		le.WithField("err", err).Info("ensure cert (periodic) failed")
+	}
+	return nil
+}
+
 func (c *Controller) startTasks(node *panel.NodeInfo) error {
 	c.nodeInfoMonitorPeriodic = &task.Task{
 		Interval: node.PullInterval,
@@ -105,9 +116,9 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		}
 
 		if needsCert(protocolSecurity(newN)) && c.CertConfig != nil {
-			err = c.requestCert()
-			if err != nil {
-				log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Request cert failed")
+			le := log.WithFields(c.logFields())
+			if _, err = EnsureCertificate(c.CertConfig, le); err != nil {
+				log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Ensure cert failed")
 				return nil
 			}
 		}

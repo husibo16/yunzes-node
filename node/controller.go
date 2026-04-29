@@ -173,8 +173,9 @@ func (c *Controller) Start() (err error) {
 
 	security := protocolSecurity(node)
 	if needsCert(security) {
-		if err = c.requestCert(); err != nil {
-			return fmt.Errorf("request cert error: %s", err)
+		le := log.WithFields(c.logFields())
+		if _, err = EnsureCertificate(c.CertConfig, le); err != nil {
+			return fmt.Errorf("ensure cert error: %s", err)
 		}
 	}
 

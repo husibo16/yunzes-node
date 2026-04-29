@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge/http01"
@@ -30,6 +29,12 @@ type Lego struct {
 	config *conf.CertConfig
 }
 
+// NewLego builds a configured ACME client. The "when to renew" decision lives
+// in EnsureCertificate; this type only wraps Obtain / Renew.
+//
+// HTTP-01 binds to host port 80 and DNS-01 mutates process-global env-vars.
+// Callers must hold node.certIssuanceMu across the entire NewLego ->
+// Obtain/Renew lifecycle so two configs cannot fight for those resources.
 func NewLego(config *conf.CertConfig) (*Lego, error) {
 	user, err := NewLegoUser(path.Join(path.Dir(config.CertFile),
 		"user",
@@ -39,7 +44,6 @@ func NewLego(config *conf.CertConfig) (*Lego, error) {
 		return nil, fmt.Errorf("create user error: %s", err)
 	}
 	c := lego.NewConfig(user)
-	//c.CADirURL = "http://192.168.99.100:4000/directory"
 	c.Certificate.KeyType = certcrypto.RSA2048
 	client, err := lego.NewClient(c)
 	if err != nil {
@@ -49,8 +53,7 @@ func NewLego(config *conf.CertConfig) (*Lego, error) {
 		client: client,
 		config: config,
 	}
-	err = l.SetProvider()
-	if err != nil {
+	if err := l.SetProvider(); err != nil {
 		return nil, fmt.Errorf("set provider error: %s", err)
 	}
 	return &l, nil
@@ -74,6 +77,10 @@ func (l *Lego) SetProvider() error {
 			return err
 		}
 	case "dns":
+		// Caller (EnsureCertificate) owns certIssuanceMu so concurrent DNS-01
+		// configs cannot trample each other's env vars between SetEnv and the
+		// ACME call. Cross-call leakage is acceptable: the next holder will
+		// overwrite to its own values before issuing.
 		for k, v := range l.config.DNSEnv {
 			os.Setenv(k, v)
 		}
@@ -89,78 +96,57 @@ func (l *Lego) SetProvider() error {
 	return nil
 }
 
-func (l *Lego) CreateCert() (err error) {
+// Obtain acquires a fresh certificate via ACME and writes it atomically.
+// The caller is responsible for deciding when an obtain is required.
+func (l *Lego) Obtain() error {
 	request := certificate.ObtainRequest{
 		Domains: []string{l.config.CertDomain},
 		Bundle:  true,
 	}
-	certificates, err := l.client.Certificate.Obtain(request)
+	res, err := l.client.Certificate.Obtain(request)
 	if err != nil {
 		return fmt.Errorf("obtain certificate error: %s", err)
 	}
-	err = l.writeCert(certificates)
-	if err != nil {
-		return fmt.Errorf("write certificate error: %s", err)
-	}
-	return nil
+	return l.writeCert(res)
 }
 
-func (l *Lego) RenewCert() error {
-	file, err := os.ReadFile(l.config.CertFile)
+// Renew renews the certificate currently on disk. Unlike the previous
+// implementation it no longer second-guesses the "should I renew now?" gate
+// — that lives in EnsureCertificate and uses the configurable
+// RenewBeforeDays threshold.
+func (l *Lego) Renew() error {
+	pemBytes, err := os.ReadFile(l.config.CertFile)
 	if err != nil {
 		return fmt.Errorf("read cert file error: %s", err)
 	}
-	if e, err := l.CheckCert(file); !e {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("check cert error: %s", err)
-	}
 	res, err := l.client.Certificate.Renew(certificate.Resource{
 		Domain:      l.config.CertDomain,
-		Certificate: file,
+		Certificate: pemBytes,
 	}, true, false, "")
 	if err != nil {
 		return err
 	}
-	err = l.writeCert(res)
-	if err != nil {
-		return fmt.Errorf("write certificate error: %s", err)
-	}
-	return nil
+	return l.writeCert(res)
 }
 
-func (l *Lego) CheckCert(file []byte) (bool, error) {
-	cert, err := certcrypto.ParsePEMCertificate(file)
-	if err != nil {
-		return false, err
-	}
-	notAfter := int(time.Until(cert.NotAfter).Hours() / 24.0)
-	if notAfter > 30 {
-		return false, nil
-	}
-	return true, nil
-}
-func (l *Lego) parseParams(path string) string {
+func (l *Lego) parseParams(p string) string {
 	r := strings.NewReplacer("{domain}", l.config.CertDomain,
 		"{email}", l.config.Email)
-	return r.Replace(path)
+	return r.Replace(p)
 }
-func (l *Lego) writeCert(certificates *certificate.Resource) error {
-	err := checkPath(l.config.CertFile)
-	if err != nil {
-		return fmt.Errorf("check path error: %s", err)
+
+// writeCert persists cert + key atomically. The temp-file + fsync + rename
+// pattern guarantees that a crash mid-write leaves the previous good cert
+// intact and never produces a partially-written file at the destination.
+func (l *Lego) writeCert(res *certificate.Resource) error {
+	certPath := l.parseParams(l.config.CertFile)
+	keyPath := l.parseParams(l.config.KeyFile)
+	if err := writeFileAtomic(certPath, res.Certificate, 0644); err != nil {
+		return fmt.Errorf("write cert file: %s", err)
 	}
-	err = os.WriteFile(l.parseParams(l.config.CertFile), certificates.Certificate, 0644)
-	if err != nil {
-		return err
-	}
-	err = checkPath(l.config.KeyFile)
-	if err != nil {
-		return fmt.Errorf("check path error: %s", err)
-	}
-	err = os.WriteFile(l.parseParams(l.config.KeyFile), certificates.PrivateKey, 0644)
-	if err != nil {
-		return err
+	// Private keys are 0600 — anything more permissive is a security smell.
+	if err := writeFileAtomic(keyPath, res.PrivateKey, 0600); err != nil {
+		return fmt.Errorf("write key file: %s", err)
 	}
 	return nil
 }
@@ -175,9 +161,11 @@ type User struct {
 func (u *User) GetEmail() string {
 	return u.Email
 }
+
 func (u *User) GetRegistration() *registration.Resource {
 	return u.Registration
 }
+
 func (u *User) GetPrivateKey() crypto.PrivateKey {
 	return u.key
 }
@@ -238,19 +226,18 @@ func EncodePrivate(privKey *ecdsa.PrivateKey) (string, error) {
 	pemEncoded := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: encoded})
 	return string(pemEncoded), nil
 }
-func (u *User) Save(path string) error {
-	err := checkPath(path)
-	if err != nil {
+
+func (u *User) Save(p string) error {
+	if err := checkPath(p); err != nil {
 		return fmt.Errorf("check path error: %s", err)
 	}
 	u.KeyEncoded, _ = EncodePrivate(u.key.(*ecdsa.PrivateKey))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	err = json.NewEncoder(f).Encode(u)
+	data, err := json.Marshal(u)
 	if err != nil {
 		return fmt.Errorf("marshal json error: %s", err)
+	}
+	if err := writeFileAtomic(p, data, 0600); err != nil {
+		return err
 	}
 	u.KeyEncoded = ""
 	return nil
@@ -268,7 +255,6 @@ func (u *User) Load(path string) error {
 	if err != nil {
 		return fmt.Errorf("open file error: %s", err)
 	}
-
 	err = json.Unmarshal(data, u)
 	if err != nil {
 		return fmt.Errorf("unmarshal json error: %s", err)

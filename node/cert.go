@@ -8,71 +8,18 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
-	"os"
 	"time"
-
-	"github.com/husibo16/yunzes-node/common/file"
-	log "github.com/sirupsen/logrus"
 )
 
-func (c *Controller) renewCertTask() error {
-	l, err := NewLego(c.CertConfig)
+// writeSelfSignedCert generates a 30-year self-signed RSA-2048 cert for
+// `domain` and writes it atomically to certPath / keyPath. Replaces the
+// previous generateSelfSslCertificate which left both files non-atomically
+// open and would overwrite a prior good cert on partial failure.
+func writeSelfSignedCert(domain, certPath, keyPath string) error {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Info("new lego error")
-		return nil
+		return fmt.Errorf("generate rsa key: %s", err)
 	}
-	err = l.RenewCert()
-	if err != nil {
-		log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Info("renew cert error")
-		return nil
-	}
-	return nil
-}
-
-func (c *Controller) requestCert() error {
-	switch c.CertConfig.CertMode {
-	case "none", "":
-	case "file":
-		if c.CertConfig.CertFile == "" || c.CertConfig.KeyFile == "" {
-			return fmt.Errorf("cert file path or key file path not exist")
-		}
-	case "dns", "http":
-		if c.CertConfig.CertFile == "" || c.CertConfig.KeyFile == "" {
-			return fmt.Errorf("cert file path or key file path not exist")
-		}
-		if file.IsExist(c.CertConfig.CertFile) && file.IsExist(c.CertConfig.KeyFile) {
-			return nil
-		}
-		l, err := NewLego(c.CertConfig)
-		if err != nil {
-			return fmt.Errorf("create lego object error: %s", err)
-		}
-		err = l.CreateCert()
-		if err != nil {
-			return fmt.Errorf("create lego cert error: %s", err)
-		}
-	case "self":
-		if c.CertConfig.CertFile == "" || c.CertConfig.KeyFile == "" {
-			return fmt.Errorf("cert file path or key file path not exist")
-		}
-		if file.IsExist(c.CertConfig.CertFile) && file.IsExist(c.CertConfig.KeyFile) {
-			return nil
-		}
-		err := generateSelfSslCertificate(
-			c.CertConfig.CertDomain,
-			c.CertConfig.CertFile,
-			c.CertConfig.KeyFile)
-		if err != nil {
-			return fmt.Errorf("generate self cert error: %s", err)
-		}
-	default:
-		return fmt.Errorf("unsupported certmode: %s", c.CertConfig.CertMode)
-	}
-	return nil
-}
-
-func generateSelfSslCertificate(domain, certPath, keyPath string) error {
-	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	tmpl := &x509.Certificate{
 		Version:      3,
 		SerialNumber: big.NewInt(time.Now().Unix()),
@@ -86,31 +33,17 @@ func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().AddDate(30, 0, 0),
 	}
-	cert, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
-		return err
+		return fmt.Errorf("create self-signed cert: %s", err)
 	}
-	f, err := os.OpenFile(certPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return err
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := writeFileAtomic(certPath, certPEM, 0644); err != nil {
+		return fmt.Errorf("write self-signed cert: %s", err)
 	}
-	err = pem.Encode(f, &pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: cert,
-	})
-	if err != nil {
-		return err
-	}
-	f, err = os.OpenFile(keyPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	err = pem.Encode(f, &pem.Block{
-		Type:  "EC PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	})
-	if err != nil {
-		return err
+	if err := writeFileAtomic(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("write self-signed key: %s", err)
 	}
 	return nil
 }
