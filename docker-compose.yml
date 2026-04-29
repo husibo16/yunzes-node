@@ -1,0 +1,22 @@
+# yunzes-node single-container deployment (xray + sing-box linked).
+#
+# Production guidance: prefer `network_mode: host` so:
+#   - ACME HTTP-01 can bind host port 80
+#   - Hysteria2 / TUIC UDP listeners receive client traffic without NAT loss
+#   - The listen IP / port detection in core/sing/node.go reflects reality
+#
+# Host network is Linux-only. On Windows / macOS Docker Desktop it falls back
+# to a VM-internal namespace and CANNOT be used for production validation.
+# See README.md (Container deployment) for the bridge fallback compose stanza.
+
+services:
+  yunzes-node:
+    image: yunzes-node:test            # build locally with `docker build -t yunzes-node:test .`
+    container_name: yunzes-node
+    network_mode: host
+    restart: always
+    volumes:
+      # Persist config.json AND the certs/ subdir so a container rebuild does
+      # not lose ACME state and trigger a fresh Let's Encrypt issue.
+      - /etc/yunzes-node:/etc/yunzes-node
+    command: ["yunzes-node", "server", "--config", "/etc/yunzes-node/config.json"]
