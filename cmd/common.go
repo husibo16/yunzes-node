@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/perfect-panel/ppanel-node/common/exec"
+	"github.com/husibo16/yunzes-node/common/exec"
 )
 
 const (
@@ -15,7 +15,7 @@ const (
 )
 
 func checkRunning() (bool, error) {
-	o, err := exec.RunCommandByShell("systemctl status ppanel-node | grep Active")
+	o, err := exec.RunCommandByShell("systemctl status yunzes-node | grep Active")
 	if err != nil {
 		return false, err
 	}

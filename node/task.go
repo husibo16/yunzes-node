@@ -3,10 +3,10 @@ package node
 import (
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	vCore "github.com/perfect-panel/ppanel-node/core"
-	"github.com/perfect-panel/ppanel-node/limiter"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/task"
+	vCore "github.com/husibo16/yunzes-node/core"
+	"github.com/husibo16/yunzes-node/limiter"
 	log "github.com/sirupsen/logrus"
 )
 

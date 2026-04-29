@@ -29,10 +29,10 @@
             "CertConfig": {
                 "CertMode": "none",
                 "RejectUnknownSni": false,
-                "CertDomain": "ppanel.test",
-                "CertFile": "/etc/ppanel-node/node.crt",
-                "KeyFile": "/etc/ppanel-node/node.key",
-                "Email": "ppanel@github.com",
+                "CertDomain": "yunzes.test",
+                "CertFile": "/etc/yunzes-node/certs/node.crt",
+                "KeyFile": "/etc/yunzes-node/certs/node.key",
+                "Email": "noreply@yunzes-node.local",
                 "Provider": "cloudflare",
                 "DNSEnv": {
                     "CF_DNS_API_TOKEN":"1234567890abcdefghijklmnopqrstuvwxyz"

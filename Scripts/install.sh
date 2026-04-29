@@ -101,10 +101,10 @@ install_base() {
 
 # 0: running, 1: not running, 2: not installed
 check_status() {
-    if [[ ! -f /etc/systemd/system/PPanel-node.service ]]; then
+    if [[ ! -f /etc/systemd/system/yunzes-node.service ]]; then
         return 2
     fi
-    temp=$(systemctl status PPanel-node | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
+    temp=$(systemctl status yunzes-node | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
     if [[ x"${temp}" == x"running" ]]; then
         return 0
     else
@@ -196,7 +196,7 @@ add_node_config() {
         esac
         read -rp "请输入节点证书域名(example.com)]：" certdomain
         if [ "$certmode" != "http" ]; then
-            echo -e "${red}请手动修改配置文件后重启PPanel-node！${plain}"
+            echo -e "${red}请手动修改配置文件后重启yunzes-node！${plain}"
         fi
     fi
     ipv6_support=$(check_ipv6_support)
@@ -225,9 +225,9 @@ add_node_config() {
                 "CertMode": "$certmode",
                 "RejectUnknownSni": false,
                 "CertDomain": "$certdomain",
-                "CertFile": "/etc/PPanel-node/fullchain.cer",
-                "KeyFile": "/etc/PPanel-node/cert.key",
-                "Email": "ppanel@github.com",
+                "CertFile": "/etc/yunzes-node/certs/fullchain.cer",
+                "KeyFile": "/etc/yunzes-node/certs/cert.key",
+                "Email": "noreply@yunzes-node.local",
                 "Provider": "cloudflare",
                 "DNSEnv": {
                     "EnvName": "env1"
@@ -254,9 +254,9 @@ EOF
                 "CertMode": "$certmode",
                 "RejectUnknownSni": false,
                 "CertDomain": "$certdomain",
-                "CertFile": "/etc/PPanel-node/fullchain.cer",
-                "KeyFile": "/etc/PPanel-node/cert.key",
-                "Email": "ppanel@github.com",
+                "CertFile": "/etc/yunzes-node/certs/fullchain.cer",
+                "KeyFile": "/etc/yunzes-node/certs/cert.key",
+                "Email": "noreply@yunzes-node.local",
                 "Provider": "cloudflare",
                 "DNSEnv": {
                     "EnvName": "env1"
@@ -270,11 +270,11 @@ EOF
 }
 
 generate_config_file() {
-    echo -e "${yellow}PPanel-node 配置文件生成向导${plain}"
+    echo -e "${yellow}yunzes-node 配置文件生成向导${plain}"
     echo -e "${red}请阅读以下注意事项：${plain}"
     echo -e "${red}1. 目前该功能正处测试阶段${plain}"
-    echo -e "${red}2. 生成的配置文件会保存到 /etc/PPanel-node/config.json${plain}"
-    echo -e "${red}3. 原来的配置文件会保存到 /etc/PPanel-node/config.json.bak${plain}"
+    echo -e "${red}2. 生成的配置文件会保存到 /etc/yunzes-node/config.json${plain}"
+    echo -e "${red}3. 原来的配置文件会保存到 /etc/yunzes-node/config.json.bak${plain}"
     echo -e "${red}4. 目前仅部分支持TLS,确定继续？(y/n)${plain}"
     read -rp "请输入：" continue_prompt
     if [[ "$continue_prompt" =~ ^[Nn][Oo]? ]]; then
@@ -321,10 +321,10 @@ generate_config_file() {
         \"Type\": \"xray\",
         \"Log\": {
             \"Level\": \"error\",
-            \"ErrorPath\": \"/etc/PPanel-node/error.log\"
+            \"ErrorPath\": \"/etc/yunzes-node/error.log\"
         },
-        \"OutboundConfigPath\": \"/etc/PPanel-node/custom_outbound.json\",
-        \"RouteConfigPath\": \"/etc/PPanel-node/route.json\"
+        \"OutboundConfigPath\": \"/etc/yunzes-node/custom_outbound.json\",
+        \"RouteConfigPath\": \"/etc/yunzes-node/route.json\"
     },"
     fi
 
@@ -342,7 +342,7 @@ generate_config_file() {
             \"Server\": \"time.apple.com\",
             \"ServerPort\": 0
         },
-        \"OriginalPath\": \"/etc/PPanel-node/sing_origin.json\"
+        \"OriginalPath\": \"/etc/yunzes-node/sing_origin.json\"
     },"
     fi
 
@@ -351,7 +351,7 @@ generate_config_file() {
     cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
 
     # 切换到配置文件目录
-    cd /etc/PPanel-node
+    cd /etc/yunzes-node
     
     # 备份旧的配置文件
     mv config.json config.json.bak
@@ -359,7 +359,7 @@ generate_config_file() {
     formatted_nodes_config="${nodes_config_str%,}"
 
     # 创建 config.json 文件
-    cat <<EOF > /etc/PPanel-node/config.json
+    cat <<EOF > /etc/yunzes-node/config.json
 {
     "Log": {
         "Level": "error",
@@ -371,7 +371,7 @@ generate_config_file() {
 EOF
     
     # 创建 custom_outbound.json 文件
-    cat <<EOF > /etc/PPanel-node/custom_outbound.json
+    cat <<EOF > /etc/yunzes-node/custom_outbound.json
 [
     {
         "tag": "IPv4_out",
@@ -395,7 +395,7 @@ EOF
 EOF
     
     # 创建 route.json 文件
-    cat <<EOF > /etc/PPanel-node/route.json
+    cat <<EOF > /etc/yunzes-node/route.json
 {
     "domainStrategy": "AsIs",
     "rules": [
@@ -430,7 +430,7 @@ EOF
 EOF
 
     # 创建 sing_origin.json 文件
-    cat <<EOF > /etc/PPanel-node/sing_origin.json
+    cat <<EOF > /etc/yunzes-node/sing_origin.json
 {
   "dns": {
     "servers": [
@@ -474,100 +474,100 @@ EOF
 }
 EOF
 
-    echo -e "${green}PPanel-node 配置文件生成完成,正在重新启动服务${plain}"
-    systemctl restart PPanel-node.service
+    echo -e "${green}yunzes-node 配置文件生成完成,正在重新启动服务${plain}"
+    systemctl restart yunzes-node.service
 }
 
-install_PPanel-node() {
-    if [[ -e /usr/local/PPanel-node/ ]]; then
-        rm -rf /usr/local/PPanel-node/
+install_yunzes-node() {
+    if [[ -e /usr/local/yunzes-node/ ]]; then
+        rm -rf /usr/local/yunzes-node/
     fi
 
-    mkdir /usr/local/PPanel-node/ -p
-    cd /usr/local/PPanel-node/
+    mkdir /usr/local/yunzes-node/ -p
+    cd /usr/local/yunzes-node/
 
     if  [ $# == 0 ] ;then
-        last_version=$(curl -Ls "https://api.github.com/repos/wyx2685/PPanel-node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -Ls "https://api.github.com/repos/husibo16/yunzes-node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 PPanel-node 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 PPanel-node 版本安装${plain}"
+            echo -e "${red}检测 yunzes-node 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 yunzes-node 版本安装${plain}"
             exit 1
         fi
-        echo -e "检测到 PPanel-node 最新版本：${last_version}，开始安装"
-        wget -q -N --no-check-certificate -O /usr/local/PPanel-node/PPanel-node-linux.zip https://github.com/wyx2685/PPanel-node/releases/download/${last_version}/PPanel-node-linux-${arch}.zip
+        echo -e "检测到 yunzes-node 最新版本：${last_version}，开始安装"
+        wget -q -N --no-check-certificate -O /usr/local/yunzes-node/yunzes-node-linux.zip https://github.com/husibo16/yunzes-node/releases/download/${last_version}/yunzes-node-linux-${arch}.zip
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 PPanel-node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
+            echo -e "${red}下载 yunzes-node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
             exit 1
         fi
     else
         last_version=$1
-        url="https://github.com/wyx2685/PPanel-node/releases/download/${last_version}/PPanel-node-linux-${arch}.zip"
-        echo -e "开始安装 PPanel-node $1"
-        wget -q -N --no-check-certificate -O /usr/local/PPanel-node/PPanel-node-linux.zip ${url}
+        url="https://github.com/husibo16/yunzes-node/releases/download/${last_version}/yunzes-node-linux-${arch}.zip"
+        echo -e "开始安装 yunzes-node $1"
+        wget -q -N --no-check-certificate -O /usr/local/yunzes-node/yunzes-node-linux.zip ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 PPanel-node $1 失败，请确保此版本存在${plain}"
+            echo -e "${red}下载 yunzes-node $1 失败，请确保此版本存在${plain}"
             exit 1
         fi
     fi
 
-    unzip PPanel-node-linux.zip
-    rm PPanel-node-linux.zip -f
-    chmod +x ppnode
-    mkdir /etc/PPanel-node/ -p
-    rm /etc/systemd/system/PPanel-node.service -f
-    file="https://raw.githubusercontent.com/wyx2685/ppanel-node/master/Scripts/PPanel-node.service"
-    wget -q -N --no-check-certificate -O /etc/systemd/system/PPanel-node.service ${file}
+    unzip yunzes-node-linux.zip
+    rm yunzes-node-linux.zip -f
+    chmod +x yunzes-node
+    mkdir /etc/yunzes-node/ -p
+    rm /etc/systemd/system/yunzes-node.service -f
+    file="https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/yunzes-node.service"
+    wget -q -N --no-check-certificate -O /etc/systemd/system/yunzes-node.service ${file}
     systemctl daemon-reload
-    systemctl stop PPanel-node
-    systemctl enable PPanel-node
-    echo -e "${green}PPanel-node ${last_version}${plain} 安装完成，已设置开机自启"
-    cp geoip.dat /etc/PPanel-node/
-    cp geosite.dat /etc/PPanel-node/
+    systemctl stop yunzes-node
+    systemctl enable yunzes-node
+    echo -e "${green}yunzes-node ${last_version}${plain} 安装完成，已设置开机自启"
+    cp geoip.dat /etc/yunzes-node/
+    cp geosite.dat /etc/yunzes-node/
 
-    if [[ ! -f /etc/PPanel-node/config.json ]]; then
-        cp config.json /etc/PPanel-node/
+    if [[ ! -f /etc/yunzes-node/config.json ]]; then
+        cp config.json /etc/yunzes-node/
         echo -e ""
         echo -e "全新安装，请先参看文档，配置必要的内容"
         first_install=true
     else
-        systemctl start PPanel-node
+        systemctl start yunzes-node
         sleep 2
         check_status
         echo -e ""
         if [[ $? == 0 ]]; then
-            echo -e "${green}PPanel-node 重启成功${plain}"
+            echo -e "${green}yunzes-node 重启成功${plain}"
         else
-            echo -e "${red}PPanel-node 启动失败"
+            echo -e "${red}yunzes-node 启动失败"
         fi
         first_install=false
     fi
 
-    curl -o /usr/bin/ppnode -Ls https://raw.githubusercontent.com/wyx2685/ppanel-node/master/Scripts/ppnode.sh
-    chmod +x /usr/bin/ppnode
+    curl -o /usr/bin/yunzes-node -Ls https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/yunzes-node.sh
+    chmod +x /usr/bin/yunzes-node
 
     cd $cur_dir
     rm -f install.sh
     echo -e ""
-    echo "PPanel-node 管理脚本使用方法: "
+    echo "yunzes-node 管理脚本使用方法: "
     echo "------------------------------------------"
-    echo "ppnode              - 显示管理菜单 (功能更多)"
-    echo "ppnode start        - 启动 PPanel-node"
-    echo "ppnode stop         - 停止 PPanel-node"
-    echo "ppnode restart      - 重启 PPanel-node"
-    echo "ppnode status       - 查看 PPanel-node 状态"
-    echo "ppnode enable       - 设置 PPanel-node 开机自启"
-    echo "ppnode disable      - 取消 PPanel-node 开机自启"
-    echo "ppnode log          - 查看 PPanel-node 日志"
-    echo "ppnode x25519       - 生成 x25519 密钥"
-    echo "ppnode generate     - 生成 PPanel-node 配置文件"
-    echo "ppnode update       - 更新 PPanel-node"
-    echo "ppnode update x.x.x - 安装 PPanel-node 指定版本"
-    echo "ppnode install      - 安装 PPanel-node"
-    echo "ppnode uninstall    - 卸载 PPanel-node"
-    echo "ppnode version      - 查看 PPanel-node 版本"
+    echo "yunzes-node              - 显示管理菜单 (功能更多)"
+    echo "yunzes-node start        - 启动 yunzes-node"
+    echo "yunzes-node stop         - 停止 yunzes-node"
+    echo "yunzes-node restart      - 重启 yunzes-node"
+    echo "yunzes-node status       - 查看 yunzes-node 状态"
+    echo "yunzes-node enable       - 设置 yunzes-node 开机自启"
+    echo "yunzes-node disable      - 取消 yunzes-node 开机自启"
+    echo "yunzes-node log          - 查看 yunzes-node 日志"
+    echo "yunzes-node x25519       - 生成 x25519 密钥"
+    echo "yunzes-node generate     - 生成 yunzes-node 配置文件"
+    echo "yunzes-node update       - 更新 yunzes-node"
+    echo "yunzes-node update x.x.x - 安装 yunzes-node 指定版本"
+    echo "yunzes-node install      - 安装 yunzes-node"
+    echo "yunzes-node uninstall    - 卸载 yunzes-node"
+    echo "yunzes-node version      - 查看 yunzes-node 版本"
     echo "------------------------------------------"
     # 首次安装询问是否生成配置文件
     if [[ $first_install == true ]]; then
-        read -rp "检测到你为第一次安装PPanel-node,是否自动直接生成配置文件？(y/n): " if_generate
+        read -rp "检测到你为第一次安装yunzes-node,是否自动直接生成配置文件？(y/n): " if_generate
         if [[ $if_generate == [Yy] ]]; then
             generate_config_file
         fi
@@ -576,4 +576,4 @@ install_PPanel-node() {
 
 echo -e "${green}开始安装${plain}"
 install_base
-install_PPanel-node $1
+install_yunzes-node $1

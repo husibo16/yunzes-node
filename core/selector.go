@@ -6,8 +6,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/conf"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/conf"
 )
 
 type Selector struct {

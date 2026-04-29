@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/format"
+	"github.com/husibo16/yunzes-node/conf"
 	"github.com/juju/ratelimit"
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/format"
-	"github.com/perfect-panel/ppanel-node/conf"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/task"
 )

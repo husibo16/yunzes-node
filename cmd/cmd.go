@@ -3,12 +3,12 @@ package cmd
 import (
 	log "github.com/sirupsen/logrus"
 
-	_ "github.com/perfect-panel/ppanel-node/core/imports"
+	_ "github.com/husibo16/yunzes-node/core/imports"
 	"github.com/spf13/cobra"
 )
 
 var command = &cobra.Command{
-	Use: "ppnode",
+	Use: "yunzes-node",
 }
 
 func Run() {

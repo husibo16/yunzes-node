@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/conf"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/conf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	coreConf "github.com/xtls/xray-core/infra/conf"

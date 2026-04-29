@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/perfect-panel/ppanel-node/conf"
+	"github.com/husibo16/yunzes-node/conf"
 	"github.com/sagernet/sing-box/option"
 )
 

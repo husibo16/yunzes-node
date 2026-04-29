@@ -6,12 +6,12 @@ import (
 	"net"
 	"sync"
 
-	"github.com/perfect-panel/ppanel-node/common/format"
-	"github.com/perfect-panel/ppanel-node/common/rate"
+	"github.com/husibo16/yunzes-node/common/format"
+	"github.com/husibo16/yunzes-node/common/rate"
 
-	"github.com/perfect-panel/ppanel-node/limiter"
+	"github.com/husibo16/yunzes-node/limiter"
 
-	"github.com/perfect-panel/ppanel-node/common/counter"
+	"github.com/husibo16/yunzes-node/common/counter"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	N "github.com/sagernet/sing/common/network"

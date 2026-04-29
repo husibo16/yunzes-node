@@ -9,8 +9,8 @@ import (
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 
-	"github.com/perfect-panel/ppanel-node/conf"
-	vCore "github.com/perfect-panel/ppanel-node/core"
+	"github.com/husibo16/yunzes-node/conf"
+	vCore "github.com/husibo16/yunzes-node/core"
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"

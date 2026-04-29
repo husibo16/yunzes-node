@@ -1,14 +1,14 @@
-# PPanel-node
+# yunzes-node
 
-A PPanel node server based on multi core, modified from V2bX.  
-一个基于多种内核的PPanel节点服务端，修改自V2bX，支持V2ay,Trojan,Shadowsocks,Tuic,Hysteria协议。
+A yunzes-node server based on multi core, modified from V2bX.  
+一个基于多种内核的 yunzes-node 节点服务端，修改自 V2bX，支持 V2ray、Trojan、Shadowsocks、Tuic、Hysteria 协议。
 
 ## 软件安装
 
 ### 一键安装
 
 ```
-wget -N https://raw.githubusercontent.com/wyx2685/ppanel-node/master/Scripts/install.sh && bash install.sh
+wget -N https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/install.sh && bash install.sh
 ```
 
 ## 构建

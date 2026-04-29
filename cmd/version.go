@@ -8,8 +8,8 @@ import (
 
 var (
 	version  = "TempVersion" //use ldflags replace
-	codename = "PPanel-node"
-	intro    = "A PPanel backend based on multi core"
+	codename = "yunzes-node"
+	intro    = "A yunzes-node backend based on multi core"
 )
 
 var versionCommand = cobra.Command{

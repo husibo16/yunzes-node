@@ -3,8 +3,8 @@ package limiter
 import (
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/format"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/format"
 )
 
 func (l *Limiter) AddDynamicSpeedLimit(tag string, userInfo *panel.UserInfo, limitNum int, expire int64) error {

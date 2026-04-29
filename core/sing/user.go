@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/counter"
-	"github.com/perfect-panel/ppanel-node/core"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/counter"
+	"github.com/husibo16/yunzes-node/core"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/hysteria2"

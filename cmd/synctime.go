@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/beevik/ntp"
-	"github.com/perfect-panel/ppanel-node/common/systime"
+	"github.com/husibo16/yunzes-node/common/systime"
 	"github.com/spf13/cobra"
 )
 

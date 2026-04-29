@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/perfect-panel/ppanel-node/common/json5"
+	"github.com/husibo16/yunzes-node/common/json5"
 )
 
 type NodeConfig struct {
@@ -23,11 +23,11 @@ type rawNodeConfig struct {
 }
 
 type ApiConfig struct {
-	APIHost      string `json:"ApiHost"`
-	NodeID       int    `json:"NodeID"`
-	Key          string `json:"ApiKey"`
-	NodeType     string `json:"NodeType"`
-	Timeout      int    `json:"Timeout"`
+	APIHost  string `json:"ApiHost"`
+	NodeID   int    `json:"NodeID"`
+	Key      string `json:"ApiKey"`
+	NodeType string `json:"NodeType"`
+	Timeout  int    `json:"Timeout"`
 }
 
 func (n *NodeConfig) UnmarshalJSON(data []byte) (err error) {

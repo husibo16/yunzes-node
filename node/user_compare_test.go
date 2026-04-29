@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
+	"github.com/husibo16/yunzes-node/api/panel"
 )
 
 func uuids(us []panel.UserInfo) []string {

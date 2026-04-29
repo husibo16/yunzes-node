@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/perfect-panel/ppanel-node/common/crypt"
+	"github.com/husibo16/yunzes-node/common/crypt"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/curve25519"

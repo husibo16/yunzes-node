@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/counter"
-	"github.com/perfect-panel/ppanel-node/common/format"
-	vCore "github.com/perfect-panel/ppanel-node/core"
-	"github.com/perfect-panel/ppanel-node/core/xray/app/dispatcher"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/counter"
+	"github.com/husibo16/yunzes-node/common/format"
+	vCore "github.com/husibo16/yunzes-node/core"
+	"github.com/husibo16/yunzes-node/core/xray/app/dispatcher"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/proxy"
 )

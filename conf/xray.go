@@ -31,7 +31,7 @@ func NewXrayConfig() *XrayConfig {
 			AccessPath: "",
 			ErrorPath:  "",
 		},
-		AssetPath:          "/etc/PPanel-node/",
+		AssetPath:          "/etc/yunzes-node/",
 		DnsConfigPath:      "",
 		InboundConfigPath:  "",
 		OutboundConfigPath: "",

@@ -6,10 +6,10 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/perfect-panel/ppanel-node/conf"
-	vCore "github.com/perfect-panel/ppanel-node/core"
-	"github.com/perfect-panel/ppanel-node/limiter"
-	"github.com/perfect-panel/ppanel-node/node"
+	"github.com/husibo16/yunzes-node/conf"
+	vCore "github.com/husibo16/yunzes-node/core"
+	"github.com/husibo16/yunzes-node/limiter"
+	"github.com/husibo16/yunzes-node/node"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +29,7 @@ var serverCommand = cobra.Command{
 func init() {
 	serverCommand.PersistentFlags().
 		StringVarP(&config, "config", "c",
-			"/etc/PPanel-node/config.json", "config file path")
+			"/etc/yunzes-node/config.json", "config file path")
 	serverCommand.PersistentFlags().
 		BoolVarP(&watch, "watch", "w",
 			true, "watch file path change")
@@ -62,7 +62,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.SetOutput(f)
 	}
 	limiter.Init()
-	log.Info("Start ppnode...")
+	log.Info("Start yunzes-node...")
 	vc, err := vCore.NewCore(c.CoresConfig)
 	if err != nil {
 		log.WithField("err", err).Error("new core failed")

@@ -83,7 +83,7 @@ confirm() {
 }
 
 confirm_restart() {
-    confirm "是否重启PPanel-node" "y"
+    confirm "是否重启yunzes-node" "y"
     if [[ $? == 0 ]]; then
         restart
     else
@@ -97,7 +97,7 @@ before_show_menu() {
 }
 
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/ppanel-node/master/Scripts/install.sh)
+    bash <(curl -Ls https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/install.sh)
     if [[ $? == 0 ]]; then
         if [[ $# == 0 ]]; then
             start
@@ -113,9 +113,9 @@ update() {
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/ppanel-node/master/Scripts/install.sh) $version
+    bash <(curl -Ls https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/install.sh) $version
     if [[ $? == 0 ]]; then
-        echo -e "${green}更新完成，已自动重启 PPanel-node，请使用 ppnode log 查看运行日志${plain}"
+        echo -e "${green}更新完成，已自动重启 yunzes-node，请使用 yunzes-node log 查看运行日志${plain}"
         exit
     fi
 
@@ -125,17 +125,17 @@ update() {
 }
 
 config() {
-    echo "PPanel-node在修改配置后会自动尝试重启"
-    vi /etc/PPanel-node/config.json
+    echo "yunzes-node在修改配置后会自动尝试重启"
+    vi /etc/yunzes-node/config.json
     sleep 2
     restart
     check_status
     case $? in
         0)
-            echo -e "PPanel-node状态: ${green}已运行${plain}"
+            echo -e "yunzes-node状态: ${green}已运行${plain}"
             ;;
         1)
-            echo -e "检测到您未启动PPanel-node或自动重启失败，是否查看日志？[Y/n]" && echo
+            echo -e "检测到您未启动yunzes-node或自动重启失败，是否查看日志？[Y/n]" && echo
             read -e -rp "(默认: y):" yn
             [[ -z ${yn} ]] && yn="y"
             if [[ ${yn} == [Yy] ]]; then
@@ -143,28 +143,28 @@ config() {
             fi
             ;;
         2)
-            echo -e "PPanel-node状态: ${red}未安装${plain}"
+            echo -e "yunzes-node状态: ${red}未安装${plain}"
     esac
 }
 
 uninstall() {
-    confirm "确定要卸载 PPanel-node 吗?" "n"
+    confirm "确定要卸载 yunzes-node 吗?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
-    systemctl stop PPanel-node
-    systemctl disable PPanel-node
-    rm /etc/systemd/system/PPanel-node.service -f
+    systemctl stop yunzes-node
+    systemctl disable yunzes-node
+    rm /etc/systemd/system/yunzes-node.service -f
     systemctl daemon-reload
     systemctl reset-failed
-    rm /etc/PPanel-node/ -rf
-    rm /usr/local/PPanel-node/ -rf
+    rm /etc/yunzes-node/ -rf
+    rm /usr/local/yunzes-node/ -rf
 
     echo ""
-    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/ppnode -f${plain} 进行删除"
+    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/yunzes-node -f${plain} 进行删除"
     echo ""
 
     if [[ $# == 0 ]]; then
@@ -176,15 +176,15 @@ start() {
     check_status
     if [[ $? == 0 ]]; then
         echo ""
-        echo -e "${green}PPanel-node已运行，无需再次启动，如需重启请选择重启${plain}"
+        echo -e "${green}yunzes-node已运行，无需再次启动，如需重启请选择重启${plain}"
     else
-        systemctl start PPanel-node
+        systemctl start yunzes-node
         sleep 2
         check_status
         if [[ $? == 0 ]]; then
-            echo -e "${green}PPanel-node 启动成功，请使用 ppnode log 查看运行日志${plain}"
+            echo -e "${green}yunzes-node 启动成功，请使用 yunzes-node log 查看运行日志${plain}"
         else
-            echo -e "${red}PPanel-node可能启动失败，请稍后使用 ppnode log 查看日志信息${plain}"
+            echo -e "${red}yunzes-node可能启动失败，请稍后使用 yunzes-node log 查看日志信息${plain}"
         fi
     fi
 
@@ -194,13 +194,13 @@ start() {
 }
 
 stop() {
-    systemctl stop PPanel-node
+    systemctl stop yunzes-node
     sleep 2
     check_status
     if [[ $? == 1 ]]; then
-        echo -e "${green}PPanel-node 停止成功${plain}"
+        echo -e "${green}yunzes-node 停止成功${plain}"
     else
-        echo -e "${red}PPanel-node停止失败，可能是因为停止时间超过了两秒，请稍后查看日志信息${plain}"
+        echo -e "${red}yunzes-node停止失败，可能是因为停止时间超过了两秒，请稍后查看日志信息${plain}"
     fi
 
     if [[ $# == 0 ]]; then
@@ -209,13 +209,13 @@ stop() {
 }
 
 restart() {
-    systemctl restart PPanel-node
+    systemctl restart yunzes-node
     sleep 2
     check_status
     if [[ $? == 0 ]]; then
-        echo -e "${green}PPanel-node 重启成功，请使用 ppnode log 查看运行日志${plain}"
+        echo -e "${green}yunzes-node 重启成功，请使用 yunzes-node log 查看运行日志${plain}"
     else
-        echo -e "${red}PPanel-node可能启动失败，请稍后使用 ppnode log 查看日志信息${plain}"
+        echo -e "${red}yunzes-node可能启动失败，请稍后使用 yunzes-node log 查看日志信息${plain}"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -223,18 +223,18 @@ restart() {
 }
 
 status() {
-    systemctl status PPanel-node --no-pager -l
+    systemctl status yunzes-node --no-pager -l
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
 enable() {
-    systemctl enable PPanel-node
+    systemctl enable yunzes-node
     if [[ $? == 0 ]]; then
-        echo -e "${green}PPanel-node 设置开机自启成功${plain}"
+        echo -e "${green}yunzes-node 设置开机自启成功${plain}"
     else
-        echo -e "${red}PPanel-node 设置开机自启失败${plain}"
+        echo -e "${red}yunzes-node 设置开机自启失败${plain}"
     fi
 
     if [[ $# == 0 ]]; then
@@ -243,11 +243,11 @@ enable() {
 }
 
 disable() {
-    systemctl disable PPanel-node
+    systemctl disable yunzes-node
     if [[ $? == 0 ]]; then
-        echo -e "${green}PPanel-node 取消开机自启成功${plain}"
+        echo -e "${green}yunzes-node 取消开机自启成功${plain}"
     else
-        echo -e "${red}PPanel-node 取消开机自启失败${plain}"
+        echo -e "${red}yunzes-node 取消开机自启失败${plain}"
     fi
 
     if [[ $# == 0 ]]; then
@@ -256,7 +256,7 @@ disable() {
 }
 
 show_log() {
-    journalctl -u PPanel-node.service -e --no-pager -f
+    journalctl -u yunzes-node.service -e --no-pager -f
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
@@ -264,23 +264,23 @@ show_log() {
 
 
 update_shell() {
-    wget -O /usr/bin/ppnode -N --no-check-certificate https://raw.githubusercontent.com/wyx2685/ppanel-node/master/Scripts/ppnode.sh
+    wget -O /usr/bin/yunzes-node -N --no-check-certificate https://raw.githubusercontent.com/husibo16/yunzes-node/master/Scripts/yunzes-node.sh
     if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
         before_show_menu
     else
-        chmod +x /usr/bin/ppnode
+        chmod +x /usr/bin/yunzes-node
         echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
     fi
 }
 
 # 0: running, 1: not running, 2: not installed
 check_status() {
-    if [[ ! -f /etc/systemd/system/PPanel-node.service ]]; then
+    if [[ ! -f /etc/systemd/system/yunzes-node.service ]]; then
         return 2
     fi
-    temp=$(systemctl status PPanel-node | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
+    temp=$(systemctl status yunzes-node | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
     if [[ x"${temp}" == x"running" ]]; then
         return 0
     else
@@ -289,7 +289,7 @@ check_status() {
 }
 
 check_enabled() {
-    temp=$(systemctl is-enabled PPanel-node)
+    temp=$(systemctl is-enabled yunzes-node)
     if [[ x"${temp}" == x"enabled" ]]; then
         return 0
     else
@@ -301,7 +301,7 @@ check_uninstall() {
     check_status
     if [[ $? != 2 ]]; then
         echo ""
-        echo -e "${red}PPanel-node已安装，请不要重复安装${plain}"
+        echo -e "${red}yunzes-node已安装，请不要重复安装${plain}"
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
@@ -315,7 +315,7 @@ check_install() {
     check_status
     if [[ $? == 2 ]]; then
         echo ""
-        echo -e "${red}请先安装PPanel-node${plain}"
+        echo -e "${red}请先安装yunzes-node${plain}"
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
@@ -329,15 +329,15 @@ show_status() {
     check_status
     case $? in
         0)
-            echo -e "PPanel-node状态: ${green}已运行${plain}"
+            echo -e "yunzes-node状态: ${green}已运行${plain}"
             show_enable_status
             ;;
         1)
-            echo -e "PPanel-node状态: ${yellow}未运行${plain}"
+            echo -e "yunzes-node状态: ${yellow}未运行${plain}"
             show_enable_status
             ;;
         2)
-            echo -e "PPanel-node状态: ${red}未安装${plain}"
+            echo -e "yunzes-node状态: ${red}未安装${plain}"
     esac
 }
 
@@ -352,16 +352,16 @@ show_enable_status() {
 
 generate_x25519_key() {
     echo -n "正在生成 x25519 密钥："
-    /usr/local/PPanel-node/ppnode x25519
+    /usr/local/yunzes-node/yunzes-node x25519
     echo ""
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
-show_PPanel-node_version() {
-    echo -n "PPanel-node 版本："
-    /usr/local/PPanel-node/ppnode version
+show_yunzes-node_version() {
+    echo -n "yunzes-node 版本："
+    /usr/local/yunzes-node/yunzes-node version
     echo ""
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -443,7 +443,7 @@ add_node_config() {
         esac
         read -rp "请输入节点证书域名(example.com)]：" certdomain
         if [ "$certmode" != "http" ]; then
-            echo -e "${red}请手动修改配置文件后重启PPanel-node！${plain}"
+            echo -e "${red}请手动修改配置文件后重启yunzes-node！${plain}"
         fi
     fi
     ipv6_support=$(check_ipv6_support)
@@ -472,9 +472,9 @@ add_node_config() {
                 "CertMode": "$certmode",
                 "RejectUnknownSni": false,
                 "CertDomain": "$certdomain",
-                "CertFile": "/etc/PPanel-node/fullchain.cer",
-                "KeyFile": "/etc/PPanel-node/cert.key",
-                "Email": "ppanel@github.com",
+                "CertFile": "/etc/yunzes-node/certs/fullchain.cer",
+                "KeyFile": "/etc/yunzes-node/certs/cert.key",
+                "Email": "noreply@yunzes-node.local",
                 "Provider": "cloudflare",
                 "DNSEnv": {
                     "EnvName": "env1"
@@ -501,9 +501,9 @@ EOF
                 "CertMode": "$certmode",
                 "RejectUnknownSni": false,
                 "CertDomain": "$certdomain",
-                "CertFile": "/etc/PPanel-node/fullchain.cer",
-                "KeyFile": "/etc/PPanel-node/cert.key",
-                "Email": "ppanel@github.com",
+                "CertFile": "/etc/yunzes-node/certs/fullchain.cer",
+                "KeyFile": "/etc/yunzes-node/certs/cert.key",
+                "Email": "noreply@yunzes-node.local",
                 "Provider": "cloudflare",
                 "DNSEnv": {
                     "EnvName": "env1"
@@ -517,11 +517,11 @@ EOF
 }
 
 generate_config_file() {
-    echo -e "${yellow}PPanel-node 配置文件生成向导${plain}"
+    echo -e "${yellow}yunzes-node 配置文件生成向导${plain}"
     echo -e "${red}请阅读以下注意事项：${plain}"
     echo -e "${red}1. 目前该功能正处测试阶段${plain}"
-    echo -e "${red}2. 生成的配置文件会保存到 /etc/PPanel-node/config.json${plain}"
-    echo -e "${red}3. 原来的配置文件会保存到 /etc/PPanel-node/config.json.bak${plain}"
+    echo -e "${red}2. 生成的配置文件会保存到 /etc/yunzes-node/config.json${plain}"
+    echo -e "${red}3. 原来的配置文件会保存到 /etc/yunzes-node/config.json.bak${plain}"
     echo -e "${red}4. 目前仅部分支持TLS,确定继续？(y/n)${plain}"
     read -rp "请输入：" continue_prompt
     if [[ "$continue_prompt" =~ ^[Nn][Oo]? ]]; then
@@ -568,10 +568,10 @@ generate_config_file() {
         \"Type\": \"xray\",
         \"Log\": {
             \"Level\": \"error\",
-            \"ErrorPath\": \"/etc/PPanel-node/error.log\"
+            \"ErrorPath\": \"/etc/yunzes-node/error.log\"
         },
-        \"OutboundConfigPath\": \"/etc/PPanel-node/custom_outbound.json\",
-        \"RouteConfigPath\": \"/etc/PPanel-node/route.json\"
+        \"OutboundConfigPath\": \"/etc/yunzes-node/custom_outbound.json\",
+        \"RouteConfigPath\": \"/etc/yunzes-node/route.json\"
     },"
     fi
 
@@ -589,7 +589,7 @@ generate_config_file() {
             \"Server\": \"time.apple.com\",
             \"ServerPort\": 0
         },
-        \"OriginalPath\": \"/etc/PPanel-node/sing_origin.json\"
+        \"OriginalPath\": \"/etc/yunzes-node/sing_origin.json\"
     },"
     fi
 
@@ -598,7 +598,7 @@ generate_config_file() {
     cores_config=$(echo "$cores_config" | sed 's/},]$/}]/')
 
     # 切换到配置文件目录
-    cd /etc/PPanel-node
+    cd /etc/yunzes-node
     
     # 备份旧的配置文件
     mv config.json config.json.bak
@@ -606,7 +606,7 @@ generate_config_file() {
     formatted_nodes_config="${nodes_config_str%,}"
 
     # 创建 config.json 文件
-    cat <<EOF > /etc/PPanel-node/config.json
+    cat <<EOF > /etc/yunzes-node/config.json
 {
     "Log": {
         "Level": "error",
@@ -618,7 +618,7 @@ generate_config_file() {
 EOF
     
     # 创建 custom_outbound.json 文件
-    cat <<EOF > /etc/PPanel-node/custom_outbound.json
+    cat <<EOF > /etc/yunzes-node/custom_outbound.json
 [
     {
         "tag": "IPv4_out",
@@ -642,7 +642,7 @@ EOF
 EOF
     
     # 创建 route.json 文件
-    cat <<EOF > /etc/PPanel-node/route.json
+    cat <<EOF > /etc/yunzes-node/route.json
 {
     "domainStrategy": "AsIs",
     "rules": [
@@ -677,7 +677,7 @@ EOF
 EOF
 
     # 创建 sing_origin.json 文件
-    cat <<EOF > /etc/PPanel-node/sing_origin.json
+    cat <<EOF > /etc/yunzes-node/sing_origin.json
 {
   "dns": {
     "servers": [
@@ -721,8 +721,8 @@ EOF
 }
 EOF
 
-    echo -e "${green}PPanel-node 配置文件生成完成,正在重新启动服务${plain}"
-    systemctl restart PPanel-node.service
+    echo -e "${green}yunzes-node 配置文件生成完成,正在重新启动服务${plain}"
+    systemctl restart yunzes-node.service
 }
 
 # 放开防火墙端口
@@ -743,50 +743,50 @@ open_ports() {
 }
 
 show_usage() {
-    echo "PPanel-node 管理脚本使用方法: "
+    echo "yunzes-node 管理脚本使用方法: "
     echo "------------------------------------------"
-    echo "ppnode              - 显示管理菜单 (功能更多)"
-    echo "ppnode start        - 启动 PPanel-node"
-    echo "ppnode stop         - 停止 PPanel-node"
-    echo "ppnode restart      - 重启 PPanel-node"
-    echo "ppnode status       - 查看 PPanel-node 状态"
-    echo "ppnode enable       - 设置 PPanel-node 开机自启"
-    echo "ppnode disable      - 取消 PPanel-node 开机自启"
-    echo "ppnode log          - 查看 PPanel-node 日志"
-    echo "ppnode x25519       - 生成 x25519 密钥"
-    echo "ppnode generate     - 生成 PPanel-node 配置文件"
-    echo "ppnode update       - 更新 PPanel-node"
-    echo "ppnode update x.x.x - 安装 PPanel-node 指定版本"
-    echo "ppnode install      - 安装 PPanel-node"
-    echo "ppnode uninstall    - 卸载 PPanel-node"
-    echo "ppnode version      - 查看 PPanel-node 版本"
+    echo "yunzes-node              - 显示管理菜单 (功能更多)"
+    echo "yunzes-node start        - 启动 yunzes-node"
+    echo "yunzes-node stop         - 停止 yunzes-node"
+    echo "yunzes-node restart      - 重启 yunzes-node"
+    echo "yunzes-node status       - 查看 yunzes-node 状态"
+    echo "yunzes-node enable       - 设置 yunzes-node 开机自启"
+    echo "yunzes-node disable      - 取消 yunzes-node 开机自启"
+    echo "yunzes-node log          - 查看 yunzes-node 日志"
+    echo "yunzes-node x25519       - 生成 x25519 密钥"
+    echo "yunzes-node generate     - 生成 yunzes-node 配置文件"
+    echo "yunzes-node update       - 更新 yunzes-node"
+    echo "yunzes-node update x.x.x - 安装 yunzes-node 指定版本"
+    echo "yunzes-node install      - 安装 yunzes-node"
+    echo "yunzes-node uninstall    - 卸载 yunzes-node"
+    echo "yunzes-node version      - 查看 yunzes-node 版本"
     echo "------------------------------------------"
 }
 
 show_menu() {
     echo -e "
-  ${green}PPanel-node 后端管理脚本，${plain}${red}不适用于docker${plain}
---- https://github.com/wyx2685/PPanel-node ---
+  ${green}yunzes-node 后端管理脚本，${plain}${red}不适用于docker${plain}
+--- https://github.com/husibo16/yunzes-node ---
   ${green}0.${plain} 修改配置
 ————————————————
-  ${green}1.${plain} 安装 PPanel-node
-  ${green}2.${plain} 更新 PPanel-node
-  ${green}3.${plain} 卸载 PPanel-node
+  ${green}1.${plain} 安装 yunzes-node
+  ${green}2.${plain} 更新 yunzes-node
+  ${green}3.${plain} 卸载 yunzes-node
 ————————————————
-  ${green}4.${plain} 启动 PPanel-node
-  ${green}5.${plain} 停止 PPanel-node
-  ${green}6.${plain} 重启 PPanel-node
-  ${green}7.${plain} 查看 PPanel-node 状态
-  ${green}8.${plain} 查看 PPanel-node 日志
+  ${green}4.${plain} 启动 yunzes-node
+  ${green}5.${plain} 停止 yunzes-node
+  ${green}6.${plain} 重启 yunzes-node
+  ${green}7.${plain} 查看 yunzes-node 状态
+  ${green}8.${plain} 查看 yunzes-node 日志
 ————————————————
-  ${green}9.${plain} 设置 PPanel-node 开机自启
-  ${green}10.${plain} 取消 PPanel-node 开机自启
+  ${green}9.${plain} 设置 yunzes-node 开机自启
+  ${green}10.${plain} 取消 yunzes-node 开机自启
 ————————————————
   ${green}11.${plain} 暂无功能
-  ${green}12.${plain} 查看 PPanel-node 版本
+  ${green}12.${plain} 查看 yunzes-node 版本
   ${green}13.${plain} 生成 X25519 密钥
-  ${green}14.${plain} 升级 PPanel-node 维护脚本
-  ${green}15.${plain} 生成 PPanel-node 配置文件
+  ${green}14.${plain} 升级 yunzes-node 维护脚本
+  ${green}15.${plain} 生成 yunzes-node 配置文件
   ${green}16.${plain} 放行 VPS 的所有网络端口
   ${green}17.${plain} 退出脚本
  "
@@ -807,7 +807,7 @@ show_menu() {
         9) check_install && enable ;;
         10) check_install && disable ;;
         11) exit ;;
-        12) check_install && show_PPanel-node_version ;;
+        12) check_install && show_yunzes-node_version ;;
         13) check_install && generate_x25519_key ;;
         14) update_shell ;;
         15) generate_config_file ;;
@@ -833,7 +833,7 @@ if [[ $# > 0 ]]; then
         "install") check_uninstall 0 && install 0 ;;
         "uninstall") check_install 0 && uninstall 0 ;;
         "x25519") check_install 0 && generate_x25519_key 0 ;;
-        "version") check_install 0 && show_PPanel-node_version 0 ;;
+        "version") check_install 0 && show_yunzes-node_version 0 ;;
         "update_shell") update_shell ;;
         *) show_usage
     esac

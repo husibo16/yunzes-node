@@ -3,8 +3,8 @@ package node
 import (
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/serverstatus"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/common/serverstatus"
 	log "github.com/sirupsen/logrus"
 )
 

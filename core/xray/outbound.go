@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	conf2 "github.com/perfect-panel/ppanel-node/conf"
+	conf2 "github.com/husibo16/yunzes-node/conf"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf"
 )

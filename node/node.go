@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/conf"
-	vCore "github.com/perfect-panel/ppanel-node/core"
+	"github.com/husibo16/yunzes-node/api/panel"
+	"github.com/husibo16/yunzes-node/conf"
+	vCore "github.com/husibo16/yunzes-node/core"
 	"github.com/sirupsen/logrus"
 )
 
@@ -173,8 +173,8 @@ func (n *Node) StartNodes(apiConfig *conf.ServerApiConfig, core vCore.Core) erro
 				CertMode:         "http", //need to set from panel
 				RejectUnknownSni: false,
 				CertDomain:       p.SNI,
-				CertFile:         fmt.Sprintf("/etc/ppanel-node/%s%d.crt", node.Type, node.Id),
-				KeyFile:          fmt.Sprintf("/etc/ppanel-node/%s%d.key", node.Type, node.Id),
+				CertFile:         fmt.Sprintf("/etc/yunzes-node/certs/%s%d.crt", node.Type, node.Id),
+				KeyFile:          fmt.Sprintf("/etc/yunzes-node/certs/%s%d.key", node.Type, node.Id),
 			}
 		case "reality":
 			nodeoptions.CertConfig = &conf.CertConfig{

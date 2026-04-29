@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/perfect-panel/ppanel-node/common/json5"
+	"github.com/husibo16/yunzes-node/common/json5"
 )
 
 type Conf struct {

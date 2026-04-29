@@ -9,7 +9,7 @@ on:
       - 'develop'
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ppnode
+  IMAGE_NAME: ${{ github.repository_owner }}/yunzes-node
 
 jobs:
   build:

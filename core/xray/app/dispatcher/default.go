@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/common/counter"
-	"github.com/perfect-panel/ppanel-node/common/rate"
-	"github.com/perfect-panel/ppanel-node/limiter"
+	"github.com/husibo16/yunzes-node/common/counter"
+	"github.com/husibo16/yunzes-node/common/rate"
+	"github.com/husibo16/yunzes-node/limiter"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
