@@ -18,12 +18,12 @@ import (
 func (c *Controller) renewCertTask() error {
 	l, err := NewLego(c.CertConfig)
 	if err != nil {
-		log.WithField("tag", c.tag).Info("new lego error: ", err)
+		log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Info("new lego error")
 		return nil
 	}
 	err = l.RenewCert()
 	if err != nil {
-		log.WithField("tag", c.tag).Info("renew cert error: ", err)
+		log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Info("renew cert error")
 		return nil
 	}
 	return nil

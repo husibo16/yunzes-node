@@ -171,7 +171,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 	var limit *limiter.Limiter
 	var err error
 	if user != nil && len(user.Email) > 0 {
-		limit, err = limiter.GetLimiter(sessionInbound.Tag)
+		limit, err = limiter.GetLimiterByRuntimeKey(sessionInbound.Tag)
 		if err != nil {
 			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
 			common.Close(outboundLink.Writer)
@@ -368,7 +368,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	var limit *limiter.Limiter
 	var err error
 	if user != nil && len(user.Email) > 0 {
-		limit, err = limiter.GetLimiter(sessionInbound.Tag)
+		limit, err = limiter.GetLimiterByRuntimeKey(sessionInbound.Tag)
 		if err != nil {
 			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
 			common.Close(outbound.Writer)

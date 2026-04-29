@@ -9,26 +9,24 @@ import (
 )
 
 func (c *Controller) reportUserTrafficTask() (err error) {
-	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, true)
+	userTraffic, _ := c.server.GetUserTrafficSlice(c.runtimeKey, true)
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(&userTraffic)
 		if err != nil {
 			// Rollback so the next cycle re-reports.
-			if rbErr := c.server.AddUserTrafficSlice(c.tag, userTraffic); rbErr != nil {
-				log.WithFields(log.Fields{
-					"tag":          c.tag,
+			if rbErr := c.server.AddUserTrafficSlice(c.runtimeKey, userTraffic); rbErr != nil {
+				log.WithFields(mergeFields(c.logFields(), log.Fields{
 					"report_err":   err,
 					"rollback_err": rbErr,
-				}).Error("Report failed AND rollback failed — traffic lost")
+				})).Error("Report failed AND rollback failed — traffic lost")
 			} else {
-				log.WithFields(log.Fields{
-					"tag":               c.tag,
+				log.WithFields(mergeFields(c.logFields(), log.Fields{
 					"err":               err,
 					"rolled_back_count": len(userTraffic),
-				}).Warn("Report failed, traffic rolled back to core for next cycle")
+				})).Warn("Report failed, traffic rolled back to core for next cycle")
 			}
 		} else {
-			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
+			log.WithFields(c.logFields()).Infof("Report %d users traffic", len(userTraffic))
 		}
 	}
 
@@ -50,12 +48,9 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 			}
 		}
 		if err = c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report online users failed")
+			log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Info("Report online users failed")
 		} else {
-			log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
+			log.WithFields(c.logFields()).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
 		}
 	}
 

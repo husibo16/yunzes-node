@@ -15,10 +15,27 @@ import (
 
 type Node struct {
 	controllers []*Controller
+	portReg     *portRegistry
 }
 
 func New() *Node {
-	return &Node{}
+	return &Node{
+		portReg: newPortRegistry(),
+	}
+}
+
+// defaultCoreFor returns the default coreType for a given protocol. Used by
+// the local-config Node.Start path to pre-compute coreType before
+// controller.Start fetches NodeInfo. The same mapping is duplicated in
+// buildServerController for the panel-driven path.
+func defaultCoreFor(protocol string) string {
+	switch protocol {
+	case "tuic", "hysteria", "hysteria2", "anytls":
+		return "sing"
+	case "vmess", "vless", "trojan", "shadowsocks":
+		return "xray"
+	}
+	return ""
 }
 
 // Start brings up controllers from local NodeConfig entries. Controllers are
@@ -32,7 +49,15 @@ func (n *Node) Start(nodes []conf.NodeConfig, core vCore.Core) error {
 			rollbackControllers(started)
 			return err
 		}
-		ctrl := NewController(core, p, &nodes[i].Options)
+		coreType := nodes[i].Options.Core
+		if coreType == "" {
+			coreType = defaultCoreFor(nodes[i].ApiConfig.NodeType)
+		}
+		if coreType == "" {
+			rollbackControllers(started)
+			return fmt.Errorf("cannot infer core for protocol %q", nodes[i].ApiConfig.NodeType)
+		}
+		ctrl := NewController(coreType, core, p, &nodes[i].Options, n.portReg)
 		if err := ctrl.Start(); err != nil {
 			rollbackControllers(started)
 			return fmt.Errorf("start node controller [%s-%s-%d] error: %s",
@@ -57,7 +82,7 @@ func (n *Node) StartNodes(apiConfig *conf.ServerApiConfig, core vCore.Core) erro
 	pushI, pullI := resolveIntervals(basic)
 	var started []*Controller
 	for _, p := range protocols {
-		ctrl, err := buildServerController(apiConfig, p, pushI, pullI, core)
+		ctrl, err := buildServerController(apiConfig, p, pushI, pullI, core, n.portReg)
 		if err != nil {
 			rollbackControllers(started)
 			return err
@@ -83,8 +108,12 @@ func (n *Node) Close() {
 			continue
 		}
 		if err := c.Close(); err != nil {
-			logrus.WithFields(logrus.Fields{"tag": c.tag, "err": err}).
-				Error("close controller failed")
+			logrus.WithFields(logrus.Fields{
+				"logical_tag": c.logicalTag,
+				"core":        c.coreType,
+				"runtime_key": c.runtimeKey,
+				"err":         err,
+			}).Error("close controller failed")
 		}
 	}
 	n.controllers = nil
@@ -100,8 +129,12 @@ func rollbackControllers(started []*Controller) {
 			continue
 		}
 		if err := c.Close(); err != nil {
-			logrus.WithFields(logrus.Fields{"tag": c.tag, "err": err}).
-				Error("rollback close failed")
+			logrus.WithFields(logrus.Fields{
+				"logical_tag": c.logicalTag,
+				"core":        c.coreType,
+				"runtime_key": c.runtimeKey,
+				"err":         err,
+			}).Error("rollback close failed")
 		}
 	}
 }
@@ -109,7 +142,7 @@ func rollbackControllers(started []*Controller) {
 // buildServerController assembles a single Controller from one ProtocolConfig
 // returned by the panel. It constructs node info, transport options, cert
 // config, and the resty client without starting anything.
-func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConfig, pushI, pullI time.Duration, core vCore.Core) (*Controller, error) {
+func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConfig, pushI, pullI time.Duration, core vCore.Core, registry *portRegistry) (*Controller, error) {
 	node := &panel.NodeInfo{
 		Id:           apiConfig.ServerId,
 		Type:         p.Type,
@@ -210,13 +243,11 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 	nodeoptions := &conf.Options{
 		DeviceOnlineMinTraffic: 0,
 	}
-	var coretype string
-	switch node.Type {
-	case "tuic", "hysteria", "hysteria2", "anytls":
-		coretype = "sing"
+	coretype := defaultCoreFor(node.Type)
+	switch coretype {
+	case "sing":
 		nodeoptions.ListenIP = "::"
-	case "vmess", "vless", "trojan", "shadowsocks":
-		coretype = "xray"
+	case "xray":
 		nodeoptions.ListenIP = "0.0.0.0"
 		nodeoptions.XrayOptions = &conf.XrayOptions{
 			EnableProxyProtocol: p.EnableProxyProtocol,
@@ -266,7 +297,7 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 		"server_id":  strconv.Itoa(node.Id),
 		"secret_key": apiConfig.SecretKey,
 	})
-	return NewController(core, &panel.Client{
+	return NewController(coretype, core, &panel.Client{
 		Client:   client,
 		Token:    apiConfig.SecretKey,
 		APIHost:  apiConfig.ApiHost,
@@ -274,7 +305,7 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 		NodeId:   node.Id,
 		UserList: &panel.UserListBody{},
 		AliveMap: &panel.AliveMap{},
-	}, nodeoptions), nil
+	}, nodeoptions, registry), nil
 }
 
 // resolveIntervals returns push/pull intervals from BasicConfig with fallbacks.

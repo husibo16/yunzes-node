@@ -66,7 +66,7 @@ func NewHookServer(enableClear bool) *HookServer {
 }
 
 func (h *HookServer) RoutedConnection(_ context.Context, conn net.Conn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) net.Conn {
-	l, err := limiter.GetLimiter(m.Inbound)
+	l, err := limiter.GetLimiterByRuntimeKey(m.Inbound)
 	if err != nil {
 		log.Warn("get limiter for ", m.Inbound, " error: ", err)
 		return conn
@@ -99,7 +99,7 @@ func (h *HookServer) RoutedConnection(_ context.Context, conn net.Conn, m adapte
 }
 
 func (h *HookServer) RoutedPacketConnection(_ context.Context, conn N.PacketConn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
-	l, err := limiter.GetLimiter(m.Inbound)
+	l, err := limiter.GetLimiterByRuntimeKey(m.Inbound)
 	if err != nil {
 		log.Warn("get limiter for ", m.Inbound, " error: ", err)
 		return conn

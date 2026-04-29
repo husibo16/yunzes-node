@@ -66,7 +66,32 @@ func isSupported(protocol string, protocols []string) bool {
 	return false
 }
 
+// validateRuntimeKey enforces the contract that any tag passed through the
+// Selector is a runtime key in the form "coreType|logicalTag" with a known
+// coreType. Single-core direct callers (xray.AddNode / sing.AddNode without
+// the Selector) are NOT subject to this check — they treat the tag as an
+// opaque string and don't depend on the "|" separator.
+func validateRuntimeKey(rk string) (coreType, logicalTag string, err error) {
+	coreType, logicalTag, ok := strings.Cut(rk, "|")
+	if !ok {
+		return "", "", fmt.Errorf("invalid runtime key %q: expected coreType|logicalTag", rk)
+	}
+	if coreType == "" {
+		return "", "", fmt.Errorf("invalid runtime key %q: coreType is empty", rk)
+	}
+	if logicalTag == "" {
+		return "", "", fmt.Errorf("invalid runtime key %q: logicalTag is empty", rk)
+	}
+	if coreType != "xray" && coreType != "sing" {
+		return "", "", fmt.Errorf("invalid runtime key %q: unknown coreType %q (allowed: xray, sing)", rk, coreType)
+	}
+	return coreType, logicalTag, nil
+}
+
 func (s *Selector) AddNode(tag string, info *panel.NodeInfo, option *conf.Options) error {
+	if _, _, err := validateRuntimeKey(tag); err != nil {
+		return err
+	}
 	var core Core
 	if len(option.CoreName) > 0 {
 		// use name to select core
@@ -106,6 +131,9 @@ func (s *Selector) AddNode(tag string, info *panel.NodeInfo, option *conf.Option
 }
 
 func (s *Selector) DelNode(tag string) error {
+	if _, _, err := validateRuntimeKey(tag); err != nil {
+		return err
+	}
 	if t, e := s.nodes.Load(tag); e {
 		err := t.(Core).DelNode(tag)
 		if err != nil {
@@ -118,6 +146,9 @@ func (s *Selector) DelNode(tag string) error {
 }
 
 func (s *Selector) AddUsers(p *AddUsersParams) (added int, err error) {
+	if _, _, err := validateRuntimeKey(p.Tag); err != nil {
+		return 0, err
+	}
 	t, e := s.nodes.Load(p.Tag)
 	if !e {
 		return 0, errors.New("the node is not have")
@@ -126,6 +157,9 @@ func (s *Selector) AddUsers(p *AddUsersParams) (added int, err error) {
 }
 
 func (s *Selector) GetUserTrafficSlice(tag string, reset bool) ([]panel.UserTraffic, error) {
+	if _, _, err := validateRuntimeKey(tag); err != nil {
+		return nil, err
+	}
 	t, e := s.nodes.Load(tag)
 	if !e {
 		return nil, errors.New("the node is not have")
@@ -134,6 +168,9 @@ func (s *Selector) GetUserTrafficSlice(tag string, reset bool) ([]panel.UserTraf
 }
 
 func (s *Selector) AddUserTrafficSlice(tag string, traffic []panel.UserTraffic) error {
+	if _, _, err := validateRuntimeKey(tag); err != nil {
+		return err
+	}
 	t, e := s.nodes.Load(tag)
 	if !e {
 		return errors.New("the node is not have")
@@ -142,6 +179,9 @@ func (s *Selector) AddUserTrafficSlice(tag string, traffic []panel.UserTraffic) 
 }
 
 func (s *Selector) DelUsers(users []panel.UserInfo, tag string) error {
+	if _, _, err := validateRuntimeKey(tag); err != nil {
+		return err
+	}
 	t, e := s.nodes.Load(tag)
 	if !e {
 		return errors.New("the node is not have")

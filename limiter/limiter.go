@@ -16,6 +16,11 @@ import (
 )
 
 var limitLock sync.RWMutex
+
+// limiter is keyed by runtimeKey = coreType + "|" + logicalTag. Hot-path
+// lookups (CheckLimit) never split this key — they pass the inbound tag
+// straight in, which is the runtimeKey we registered when AddLimiter was
+// called.
 var limiter map[string]*Limiter
 
 func Init() {
@@ -36,12 +41,12 @@ type Limiter struct {
 	DomainRules   []*regexp.Regexp
 	ProtocolRules []string
 	SpeedLimit    int
-	UserOnlineIP  *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
+	UserOnlineIP  *sync.Map      // Key: runtimeKey|uuid, value: {Key: Ip, value: Uid}
 	OldUserOnline *sync.Map      // Key: Ip, value: Uid
 	UUIDtoUID     map[string]int // Key: UUID, value: Uid
-	UserLimitInfo *sync.Map      // Key: TagUUID, value: UserLimitInfo
-	ConnLimiter   *ConnLimiter   // Key: TagUUID value: ConnLimiter
-	SpeedLimiter  *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
+	UserLimitInfo *sync.Map      // Key: runtimeKey|uuid, value: UserLimitInfo
+	ConnLimiter   *ConnLimiter   // Key: runtimeKey|uuid value: ConnLimiter
+	SpeedLimiter  *sync.Map      // Key: runtimeKey|uuid, value: *ratelimit.Bucket
 	AliveList     map[int]int    // Key: Uid, value: alive_ip
 }
 
@@ -54,7 +59,16 @@ type UserLimitInfo struct {
 	OverLimit         bool
 }
 
-func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveList map[int]int) *Limiter {
+// AddLimiter registers a new Limiter under runtimeKey(coreType, logicalTag).
+// It returns the freshly-installed Limiter; if one already existed under the
+// same key it is overwritten (this matches the previous tag-only behavior so
+// hot-reload paths still work).
+//
+// Internally every per-user store key is format.UserTag(runtimeKey, uuid),
+// which is exactly what data-path lookups (sing hook, xray dispatcher) build
+// from sessionInbound.Tag + user identifier.
+func AddLimiter(coreType, logicalTag string, l *conf.LimitConfig, users []panel.UserInfo, aliveList map[int]int) *Limiter {
+	rk := format.RuntimeKey(coreType, logicalTag)
 	info := &Limiter{
 		SpeedLimit:    l.SpeedLimit,
 		UserOnlineIP:  new(sync.Map),
@@ -76,18 +90,20 @@ func AddLimiter(tag string, l *conf.LimitConfig, users []panel.UserInfo, aliveLi
 			userLimit.DeviceLimit = users[i].DeviceLimit
 		}
 		userLimit.OverLimit = false
-		info.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
+		info.UserLimitInfo.Store(format.UserTag(rk, users[i].Uuid), userLimit)
 	}
 	info.UUIDtoUID = uuidmap
 	limitLock.Lock()
-	limiter[tag] = info
+	limiter[rk] = info
 	limitLock.Unlock()
 	return info
 }
 
-func GetLimiter(tag string) (info *Limiter, err error) {
+// GetLimiterByRuntimeKey is the hot-path lookup. It does NOT split the key —
+// callers (sing hook, xray dispatcher) pass sessionInbound.Tag straight in.
+func GetLimiterByRuntimeKey(runtimeKey string) (info *Limiter, err error) {
 	limitLock.RLock()
-	info, ok := limiter[tag]
+	info, ok := limiter[runtimeKey]
 	limitLock.RUnlock()
 	if !ok {
 		return nil, errors.New("not found")
@@ -95,17 +111,23 @@ func GetLimiter(tag string) (info *Limiter, err error) {
 	return info, nil
 }
 
-func DeleteLimiter(tag string) {
+// DeleteLimiter is the control-plane removal. The (coreType, logicalTag) pair
+// is rejoined to a runtimeKey internally.
+func DeleteLimiter(coreType, logicalTag string) {
+	rk := format.RuntimeKey(coreType, logicalTag)
 	limitLock.Lock()
-	delete(limiter, tag)
+	delete(limiter, rk)
 	limitLock.Unlock()
 }
 
-func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel.UserInfo) {
+// UpdateUser refreshes per-user state when the panel reports user adds/removes.
+// runtimeKey must match the value used at AddLimiter time so the per-user
+// map keys stay aligned with hot-path lookups.
+func (l *Limiter) UpdateUser(runtimeKey string, added []panel.UserInfo, deleted []panel.UserInfo) {
 	for i := range deleted {
-		l.UserLimitInfo.Delete(format.UserTag(tag, deleted[i].Uuid))
-		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
-		l.SpeedLimiter.Delete(format.UserTag(tag, deleted[i].Uuid))
+		l.UserLimitInfo.Delete(format.UserTag(runtimeKey, deleted[i].Uuid))
+		l.UserOnlineIP.Delete(format.UserTag(runtimeKey, deleted[i].Uuid))
+		l.SpeedLimiter.Delete(format.UserTag(runtimeKey, deleted[i].Uuid))
 		delete(l.UUIDtoUID, deleted[i].Uuid)
 		delete(l.AliveList, deleted[i].Id)
 	}
@@ -121,13 +143,13 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 			userLimit.DeviceLimit = added[i].DeviceLimit
 		}
 		userLimit.OverLimit = false
-		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
+		l.UserLimitInfo.Store(format.UserTag(runtimeKey, added[i].Uuid), userLimit)
 		l.UUIDtoUID[added[i].Uuid] = added[i].Id
 	}
 }
 
-func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire time.Time) error {
-	if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, uuid)); ok {
+func (l *Limiter) UpdateDynamicSpeedLimit(runtimeKey, uuid string, limit int, expire time.Time) error {
+	if v, ok := l.UserLimitInfo.Load(format.UserTag(runtimeKey, uuid)); ok {
 		info := v.(*UserLimitInfo)
 		info.DynamicSpeedLimit = limit
 		info.ExpireTime = expire.Unix()

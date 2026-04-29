@@ -7,12 +7,12 @@ import (
 	"github.com/husibo16/yunzes-node/common/format"
 )
 
-func (l *Limiter) AddDynamicSpeedLimit(tag string, userInfo *panel.UserInfo, limitNum int, expire int64) error {
+func (l *Limiter) AddDynamicSpeedLimit(runtimeKey string, userInfo *panel.UserInfo, limitNum int, expire int64) error {
 	userLimit := &UserLimitInfo{
 		DynamicSpeedLimit: limitNum,
 		ExpireTime:        time.Now().Add(time.Duration(expire) * time.Second).Unix(),
 	}
-	l.UserLimitInfo.Store(format.UserTag(tag, userInfo.Uuid), userLimit)
+	l.UserLimitInfo.Store(format.UserTag(runtimeKey, userInfo.Uuid), userLimit)
 	return nil
 }
 
