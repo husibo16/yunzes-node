@@ -68,7 +68,7 @@ IFS=$'\n\t'
 # M01 core: constants, paths, locale, color palette
 # ============================================================================
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -756,8 +756,8 @@ validate_config() {
     api_server_id=$(jq -r '.Api.ServerID  // 0'  "$CONFIG_FILE")
     api_secret=$(jq  -r '.Api.SecretKey // ""' "$CONFIG_FILE")
     if [[ -n "$api_host" && "$api_server_id" != "0" && -n "$api_secret" && "$total" == "0" ]]; then
-        print_ok "$(_t "智能模式：ApiHost=$api_host  ServerID=$api_server_id" \
-                       "Smart mode: ApiHost=$api_host  ServerID=$api_server_id")"
+        print_ok "$(_t "智能模式：面板=$api_host  ServerID=$api_server_id" \
+                       "Smart mode: panel=$api_host  ServerID=$api_server_id")"
         print_ok "$(_t '配置体检通过（智能模式由面板下发协议参数，本地无需 NodeID/NodeType 校验）' \
                        'Config validation passed (smart mode — panel supplies per-protocol fields)')"
         return 0
@@ -1169,21 +1169,22 @@ verify_network() {
             else
                 print_fail "$(_t "$p $port/$t 期待监听但未发现" "$p $port/$t expected listen NOT FOUND")"; myfail=$((myfail+1))
                 # Auto-diagnostic: explain WHY the bind likely failed.
+                # All locals initialized to empty so `set -u` doesn't trip if
+                # the case below doesn't match (e.g. unknown transport) or
+                # the pipeline produces no output.
+                local owner_line="" owner_proc="" xray_warn="" reality_lines=""
                 # 1. Is the port held by another process on the host?
-                local owner_line
                 case "$t" in
                     tcp) owner_line=$(ss -lntp 2>/dev/null | awk -v pat=":$port" '$4 ~ pat"$"' | head -1 || true) ;;
                     udp) owner_line=$(ss -lnup 2>/dev/null | awk -v pat=":$port" '$4 ~ pat"$"' | head -1 || true) ;;
                 esac
                 if [[ -n "$owner_line" ]]; then
-                    local owner_proc
-                    owner_proc=$(echo "$owner_line" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+                    owner_proc=$(echo "$owner_line" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)
                     if [[ -n "$owner_proc" && "$owner_proc" != "$NAME" ]]; then
                         print_fix "$(_t "  $port/$t 被 $owner_proc 占用 — 改另一个端口或停掉 $owner_proc" "  $port/$t held by $owner_proc — pick another port or stop $owner_proc")"
                     fi
                 fi
                 # 2. xray / sing 内部 bind 错误（warn 级别，不会进 L1 panic 检测）
-                local xray_warn
                 xray_warn=$(docker logs --tail 500 "$NAME" 2>&1 \
                     | grep -E "(\[Warning\]|\[Error\]|level=(warn|warning|error)).*($port|$p)" \
                     | tail -3 || true)
@@ -1193,7 +1194,6 @@ verify_network() {
                 fi
                 # 3. 配置 hint：reality 缺字段是常见 silent fail
                 if [[ "$p" == "vless" ]]; then
-                    local reality_lines
                     reality_lines=$(docker logs --tail 300 "$NAME" 2>&1 | grep -i "reality" | tail -3 || true)
                     if [[ -n "$reality_lines" ]]; then
                         print_info "$(_t "  reality 相关日志:" "  reality-related lines:")"
@@ -1390,7 +1390,7 @@ cmd_install() {
 
     local b
     b=$(backup_now)
-    print_info "$(_t "Pre-install 备份: $b" "Pre-install backup: $b")"
+    print_info "$(_t "安装前备份: $b" "Pre-install backup: $b")"
 
     print_cmd "docker rm -f $NAME"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -1719,117 +1719,201 @@ cmd_gen_config() {
 #   2 — panel does not support /v2 (404); caller should fall back to
 #       gen_config_interactive (manual mode)
 gen_config_smart_mode() {
-    local api_host secret_key server_id
-    api_host=$(prompt_required "$(_t '面板 ApiHost (例: https://api.example.com)' 'Panel ApiHost (e.g. https://api.example.com)')" \
-                                "ApiHost 不能为空" "ApiHost is required")
+    local api_host secret_key
+    api_host=$(prompt_required "$(_t '面板 ApiHost（例: https://api.example.com）' 'Panel ApiHost (e.g. https://api.example.com)')" \
+                                "ApiHost 不能为空" "ApiHost is required") || return 1
     secret_key=$(prompt_required "$(_t '面板 SecretKey' 'Panel SecretKey')" \
-                                "SecretKey 不能为空，否则 /v2/server 调用全部 401" "SecretKey is required, otherwise all /v2/server calls return 401")
-    server_id=$(prompt_required "$(_t 'ServerID (整数, 一个 ServerID 可包含多协议)' 'ServerID (integer, one ServerID can host multiple protocols)')" \
-                                "ServerID 不能为空" "ServerID is required")
-    if ! [[ "$server_id" =~ ^[0-9]+$ ]]; then
-        print_fail "$(_t "ServerID 必须是整数: $server_id" "ServerID must be an integer: $server_id")"
-        return 1
-    fi
+                                "SecretKey 不能为空，否则面板调用全部 401" "SecretKey is required, otherwise all panel calls return 401") || return 1
 
-    print_step "$(_t "探测面板 /v2/server/$server_id 接口" "Probing panel /v2/server/$server_id")"
-    local probe_url="${api_host%/}/v2/server/${server_id}?secret_key=${secret_key}"
-    local probe_log_safe="${api_host%/}/v2/server/${server_id}?secret_key=***"
-    print_cmd "curl -s --connect-timeout 5 $probe_log_safe"
+    # Multi-ServerID loop: each round probes one ServerID via /v2/server/{id}
+    # and accumulates (server_id, protocol_type) pairs. The operator can
+    # type "q" or answer N to "再添加一个 ServerID" to stop.
+    local -a all_sids=() all_ptypes=() all_pports=()
+    local round=1
+    local v1_fallback_ran=0
 
-    local body_file http_code
-    body_file=$(mktemp)
-    http_code=$(curl -s -o "$body_file" -w '%{http_code}' --connect-timeout 5 "$probe_url" || echo 000)
-
-    case "$http_code" in
-        200) ;;
-        404)
-            print_warn "$(_t "面板不支持 /v2/server/$server_id 接口（HTTP 404）— 切换到 /v1 探测模式" "Panel does not implement /v2/server/$server_id (HTTP 404) — switching to /v1 probe mode")"
-            rm -f "$body_file"
-            gen_config_probe_v1_mode "$api_host" "$secret_key" "$server_id"
-            return $?
-            ;;
-        401|403)
-            print_fail "$(_t "面板拒绝（HTTP $http_code）— SecretKey 错或权限不足" "Panel rejected (HTTP $http_code) — wrong SecretKey or insufficient privilege")"
-            rm -f "$body_file"
-            return 1
-            ;;
-        000|"")
-            print_fail "$(_t "无法连接面板 $api_host" "Cannot connect to panel $api_host")"
-            rm -f "$body_file"
-            return 1
-            ;;
-        5*)
-            print_fail "$(_t "面板内部错误 HTTP $http_code" "Panel internal error HTTP $http_code")"
-            rm -f "$body_file"
-            return 1
-            ;;
-        *)
-            print_warn "$(_t "面板返回非预期状态 HTTP $http_code，将尝试解析" "Panel returned unexpected status HTTP $http_code, trying to parse anyway")"
-            ;;
-    esac
-
-    # Parse: panel returns {"code":..., "msg":..., "data":{"basic":..., "protocols":[...]}}
-    if ! jq empty "$body_file" 2>/dev/null; then
-        print_fail "$(_t "面板返回非合法 JSON" "Panel returned invalid JSON")"
-        print_info "$(_t '以下为面板返回的原始响应:' 'Raw panel response below:')"
-        head -c 400 "$body_file"; echo
-        rm -f "$body_file"
-        return 1
-    fi
-    local protocols_count
-    protocols_count=$(jq '.data.protocols | length // 0' "$body_file" 2>/dev/null)
-    if (( protocols_count == 0 )); then
-        print_fail "$(_t "面板上的 ServerID=$server_id 没有配置任何协议" "ServerID=$server_id on the panel has zero protocols configured")"
-        print_fix "$(_t "请在面板后台为该 ServerID 添加至少一个协议节点，再重跑" "Add at least one protocol to this ServerID on the panel, then retry")"
-        rm -f "$body_file"
-        return 1
-    fi
-
-    print_ok "$(_t "面板返回 $protocols_count 个协议:" "Panel returned $protocols_count protocols:")"
-    local row n=0
-    while IFS= read -r row; do
-        n=$((n+1))
-        local ptype pport psec
-        ptype=$(echo "$row" | jq -r '.type // "?"')
-        pport=$(echo "$row" | jq -r '.port // "?"')
-        psec=$( echo "$row" | jq -r '.security // ""')
-        if [[ -n "$psec" && "$psec" != "null" ]]; then
-            print_choice "$n)" "$ptype  port=$pport  security=$psec"
+    while true; do
+        local sid_prompt sid_default
+        if (( round == 1 )); then
+            sid_prompt=$(_t 'ServerID（整数，一个 ServerID 可包含多个协议）' 'ServerID (integer, one ServerID can host multiple protocols)')
+            sid_default=""
         else
-            print_choice "$n)" "$ptype  port=$pport"
+            print_separator
+            if ! confirm "$(_t '再添加一个 ServerID（多 ServerID 配置会自动写为 Nodes[] 多节点格式）' \
+                              'Add another ServerID (multi-ServerID writes as Nodes[] format)')" n; then
+                break
+            fi
+            sid_prompt=$(_t '下一个 ServerID' 'Next ServerID')
+            # Default to the next number after the largest seen ServerID.
+            local last_sid="${all_sids[-1]:-1}"
+            sid_default=$((last_sid + 1))
         fi
-    done < <(jq -c '.data.protocols[]' "$body_file")
-    rm -f "$body_file"
+        local sid
+        if [[ -n "$sid_default" ]]; then
+            sid=$(prompt_read "$sid_prompt" "$sid_default")
+        else
+            sid=$(prompt_required "$sid_prompt" "ServerID 不能为空" "ServerID is required") || {
+                if (( round == 1 )); then return 1; else break; fi
+            }
+        fi
+        if ! [[ "$sid" =~ ^[0-9]+$ ]]; then
+            print_warn "$(_t "ServerID 必须是整数，已跳过：$sid" "ServerID must be an integer, skipping: $sid")"
+            continue
+        fi
 
-    if ! confirm "$(_t "确认使用以上 $protocols_count 个协议（写为智能模式 config，由面板统一下发）" \
-                       "Confirm using the $protocols_count protocols above (smart-mode config, panel-driven)")" y; then
+        # Probe /v2/server/{sid}
+        print_step "$(_t "探测面板 /v2/server/$sid 接口" "Probing panel /v2/server/$sid")"
+        local probe_url="${api_host%/}/v2/server/${sid}?secret_key=${secret_key}"
+        local probe_log_safe="${api_host%/}/v2/server/${sid}?secret_key=***"
+        print_cmd "curl -s --connect-timeout 5 $probe_log_safe"
+
+        local body_file http_code
+        body_file=$(mktemp)
+        http_code=$(curl -s -o "$body_file" -w '%{http_code}' --connect-timeout 5 "$probe_url" || echo 000)
+
+        case "$http_code" in
+            200) ;;
+            404)
+                # First-round 404: fall back to /v1 probe path.
+                # Subsequent-round 404: just warn and let user pick another.
+                if (( round == 1 )); then
+                    print_warn "$(_t "面板不支持 /v2/server/$sid 接口（HTTP 404）— 切换到 /v1 探测模式" \
+                                    "Panel does not implement /v2/server/$sid (HTTP 404) — switching to /v1 probe mode")"
+                    rm -f "$body_file"
+                    gen_config_probe_v1_mode "$api_host" "$secret_key" "$sid"
+                    v1_fallback_ran=1
+                    return $?
+                else
+                    print_warn "$(_t "ServerID=$sid 返回 HTTP 404（面板上不存在），跳过" "ServerID=$sid returned HTTP 404 (not on panel), skipping")"
+                    rm -f "$body_file"
+                    round=$((round+1))
+                    continue
+                fi
+                ;;
+            401|403)
+                print_fail "$(_t "面板拒绝（HTTP $http_code）— SecretKey 错或权限不足" "Panel rejected (HTTP $http_code) — wrong SecretKey or insufficient privilege")"
+                rm -f "$body_file"
+                return 1
+                ;;
+            000|"")
+                print_fail "$(_t "无法连接面板 $api_host" "Cannot connect to panel $api_host")"
+                rm -f "$body_file"
+                return 1
+                ;;
+            5*)
+                print_warn "$(_t "面板内部错误 HTTP $http_code，跳过该 ServerID" "Panel internal error HTTP $http_code, skipping ServerID")"
+                rm -f "$body_file"
+                round=$((round+1))
+                continue
+                ;;
+            *)
+                print_warn "$(_t "面板返回非预期状态 HTTP $http_code，将尝试解析" "Panel returned unexpected status HTTP $http_code, trying to parse anyway")"
+                ;;
+        esac
+
+        if ! jq empty "$body_file" 2>/dev/null; then
+            print_warn "$(_t "ServerID=$sid 返回非合法 JSON，跳过" "ServerID=$sid returned invalid JSON, skipping")"
+            rm -f "$body_file"
+            round=$((round+1))
+            continue
+        fi
+        local protocols_count
+        protocols_count=$(jq '.data.protocols | length // 0' "$body_file" 2>/dev/null)
+        if (( protocols_count == 0 )); then
+            print_warn "$(_t "ServerID=$sid 上没有配置任何协议，跳过" "ServerID=$sid has zero protocols configured, skipping")"
+            rm -f "$body_file"
+            round=$((round+1))
+            continue
+        fi
+
+        print_ok "$(_t "ServerID=$sid 返回 $protocols_count 个协议:" "ServerID=$sid returned $protocols_count protocols:")"
+        local row
+        while IFS= read -r row; do
+            local ptype pport psec
+            ptype=$(echo "$row" | jq -r '.type // "?"')
+            pport=$(echo "$row" | jq -r '.port // "?"')
+            psec=$( echo "$row" | jq -r '.security // ""')
+            if [[ -n "$psec" && "$psec" != "null" ]]; then
+                print_choice "  +" "ServerID=$sid  $ptype  port=$pport  security=$psec"
+            else
+                print_choice "  +" "ServerID=$sid  $ptype  port=$pport"
+            fi
+            all_sids+=("$sid")
+            all_ptypes+=("$ptype")
+            all_pports+=("$pport")
+        done < <(jq -c '.data.protocols[]' "$body_file")
+        rm -f "$body_file"
+        round=$((round+1))
+    done
+
+    if (( v1_fallback_ran == 1 )); then
+        return 0  # v1-probe-mode path already wrote the config
+    fi
+
+    local total_count="${#all_sids[@]}"
+    if (( total_count == 0 )); then
+        print_fail "$(_t '没有探测到任何协议' 'No protocols discovered')"
         return 1
     fi
+
+    print_separator
+    print_ok "$(_t "总计探测到 $total_count 个协议" "Discovered $total_count protocols total")"
+    print_separator
+
+    if ! confirm "$(_t "确认使用以上 $total_count 个协议生成配置" \
+                       "Confirm generating config from these $total_count protocols")" y; then
+        return 1
+    fi
+
+    # Output format selection:
+    #   - 1 unique ServerID  -> StartNodes-style config (panel-driven /v2 at
+    #     runtime; one /v2 call per refresh; most efficient)
+    #   - >1 unique ServerID -> Nodes[] config (one entry per (sid,protocol);
+    #     runtime fetches each via /v1)
+    local unique_sids
+    unique_sids=$(printf '%s\n' "${all_sids[@]}" | sort -u | wc -l)
 
     local final
-    final=$(jq -n \
-        --arg ah "$api_host" --arg sk "$secret_key" --argjson sid "$server_id" \
-        '{
+    if (( unique_sids == 1 )); then
+        local only_sid="${all_sids[0]}"
+        final=$(jq -n \
+            --arg ah "$api_host" --arg sk "$secret_key" --argjson sid "$only_sid" \
+            '{
+                Log:   {Level: "info"},
+                Cores: [{Type:"xray"}, {Type:"sing"}],
+                Api:   {ApiHost: $ah, ServerID: $sid, SecretKey: $sk, Timeout: 30},
+                Nodes: []
+            }')
+        print_info "$(_t "单 ServerID 配置 → 智能模式 config（运行时一次 /v2/server/$only_sid 拿全部 $total_count 个协议）" \
+                       "Single ServerID -> smart-mode config (runtime: one /v2/server/$only_sid call returns all $total_count protocols)")"
+    else
+        local nodes_json="[]" i
+        for ((i=0; i<total_count; i++)); do
+            local node
+            node=$(jq -n \
+                --arg ah "$api_host" --arg ak "$secret_key" \
+                --argjson nid "${all_sids[$i]}" --arg nt "${all_ptypes[$i]}" \
+                '{ApiHost:$ah, ApiKey:$ak, NodeID:$nid, NodeType:$nt, Timeout:30, ListenIP:"0.0.0.0", CertConfig:{CertMode:"none"}}')
+            nodes_json=$(echo "$nodes_json" | jq --argjson n "$node" '. + [$n]')
+        done
+        final=$(jq -n --argjson nodes "$nodes_json" '{
             Log:   {Level: "info"},
             Cores: [{Type:"xray"}, {Type:"sing"}],
-            Api: {
-                ApiHost:   $ah,
-                ServerID:  $sid,
-                SecretKey: $sk,
-                Timeout:   30
-            },
-            Nodes: []
+            Nodes: $nodes
         }')
+        print_info "$(_t "多 ServerID（$unique_sids 个） → Nodes[] 多节点 config（每个 (ServerID, 协议) 一条记录）" \
+                       "Multiple ServerIDs ($unique_sids) -> Nodes[] config (one entry per (ServerID, protocol))")"
+    fi
+
     if ! echo "$final" | jq empty 2>/dev/null; then
-        print_fail "$(_t "生成的 JSON 不合法（脚本 bug，请反馈）" "Generated JSON invalid (script bug)")"
+        print_fail "$(_t '生成的 JSON 不合法（脚本 bug，请反馈）' 'Generated JSON invalid (script bug)')"
         return 1
     fi
     echo "$final" > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
-    print_ok "$(_t "已写入 $CONFIG_FILE （智能模式：$protocols_count 个协议由面板下发）" \
-                  "Wrote $CONFIG_FILE (smart mode: $protocols_count protocols served by panel)")"
-    print_info "$(_t '运行时面板会决定每个协议的端口、cipher、security 等具体参数；本地不再需要手动维护 NodeID/NodeType 列表' \
-                    'At runtime the panel decides per-protocol port/cipher/security; the local config no longer needs manual NodeID/NodeType lists')"
+    print_ok "$(_t "已写入 $CONFIG_FILE （$total_count 个协议）" "Wrote $CONFIG_FILE ($total_count protocols)")"
+    print_info "$(_t '运行时面板会决定每个协议的端口、加密方式、TLS 等具体参数；本地不再需要手动维护协议列表' \
+                    'At runtime panel decides per-protocol port/cipher/TLS; local config no longer needs manual protocol lists')"
     return 0
 }
 
@@ -2113,7 +2197,7 @@ cmd_rollback() {
     fi
     local before
     before=$(backup_now)
-    print_info "$(_t "当前状态已备份到 $before (rollback-before-保险)" "Current state backed up to $before (rollback-before safety)")"
+    print_info "$(_t "当前状态已备份到 $before（回滚前保险快照）" "Current state backed up to $before (rollback-before safety)")"
     if restore_from_backup "$target"; then
         sleep 3
         cmd_verify || print_warn "$(_t 'verify 有未通过项' 'verify has issues')"
