@@ -89,6 +89,44 @@ func (x *Xray) GetUserTrafficSlice(tag string, reset bool) ([]panel.UserTraffic,
 	return nil, nil
 }
 
+// AddUserTrafficSlice re-adds a previously read-but-not-confirmed traffic
+// slice back to the per-user counters. Used by node controllers to roll back
+// after a failed Report so the next push cycle re-sends.
+func (x *Xray) AddUserTrafficSlice(tag string, traffic []panel.UserTraffic) error {
+	if len(traffic) == 0 {
+		return nil
+	}
+	x.users.mapLock.RLock()
+	defer x.users.mapLock.RUnlock()
+
+	v, ok := x.dispatcher.Counter.Load(tag)
+	if !ok {
+		return fmt.Errorf("counter for tag %s not found", tag)
+	}
+	c := v.(*counter.TrafficCounter)
+
+	// uidMap is email → uid; build reverse for lookup by uid.
+	reverseMap := make(map[int]string, len(x.users.uidMap))
+	for email, uid := range x.users.uidMap {
+		reverseMap[uid] = email
+	}
+
+	for _, t := range traffic {
+		email, ok := reverseMap[t.UID]
+		if !ok {
+			continue
+		}
+		v, ok := c.Counters.Load(email)
+		if !ok {
+			continue
+		}
+		ts := v.(*counter.TrafficStorage)
+		ts.UpCounter.Add(t.Upload)
+		ts.DownCounter.Add(t.Download)
+	}
+	return nil
+}
+
 func (c *Xray) AddUsers(p *vCore.AddUsersParams) (added int, err error) {
 	c.users.mapLock.Lock()
 	defer c.users.mapLock.Unlock()

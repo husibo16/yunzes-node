@@ -48,13 +48,14 @@ func (n *Node) StartNodes(apiConfig *conf.ServerApiConfig, core vCore.Core) erro
 		return err
 	}
 	var nodeinfos []*panel.NodeInfo
-	n.controllers = make([]*Controller, len(nodeinfos))
+	n.controllers = make([]*Controller, len(protocols))
+	pushI, pullI := resolveIntervals(basic)
 	for i, p := range protocols {
 		node := &panel.NodeInfo{
 			Id:           apiConfig.ServerId,
 			Type:         p.Type,
-			PushInterval: time.Duration(basic.PushInterval.(int)) * time.Second,
-			PullInterval: time.Duration(basic.PullInterval.(int)) * time.Second,
+			PushInterval: pushI,
+			PullInterval: pullI,
 			Common: &panel.CommonNode{
 				Protocol: p.Type,
 			},
@@ -232,4 +233,49 @@ func (n *Node) Close() {
 		}
 	}
 	n.controllers = nil
+}
+
+// resolveIntervals returns push/pull intervals from BasicConfig with fallbacks.
+// JSON decoders default numeric fields to float64, so the original .(int)
+// assertion on basic.PushInterval would panic. Also tolerates a nil basic
+// (server without the basic field, or pre-fix server build).
+func resolveIntervals(basic *panel.BasicConfig) (push, pull time.Duration) {
+	const defaultPush = 30 * time.Second
+	const defaultPull = 60 * time.Second
+	if basic == nil {
+		return defaultPush, defaultPull
+	}
+	push = intervalSec(basic.PushInterval, defaultPush)
+	pull = intervalSec(basic.PullInterval, defaultPull)
+	return
+}
+
+func intervalSec(v any, def time.Duration) time.Duration {
+	if v == nil {
+		return def
+	}
+	switch x := v.(type) {
+	case int:
+		if x <= 0 {
+			return def
+		}
+		return time.Duration(x) * time.Second
+	case int64:
+		if x <= 0 {
+			return def
+		}
+		return time.Duration(x) * time.Second
+	case float64:
+		if x <= 0 {
+			return def
+		}
+		return time.Duration(x) * time.Second
+	case string:
+		n, err := strconv.Atoi(x)
+		if err != nil || n <= 0 {
+			return def
+		}
+		return time.Duration(n) * time.Second
+	}
+	return def
 }

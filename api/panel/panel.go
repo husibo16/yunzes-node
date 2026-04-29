@@ -132,7 +132,7 @@ func GetServerNodeConfigs(apiConfig *conf.ServerApiConfig) ([]ProtocolConfig, *B
 	path := fmt.Sprintf("/v2/server/%d", apiConfig.ServerId)
 	r, err := client.
 		R().
-		SetHeader("secret_key", apiConfig.SecretKey).
+		SetQueryParam("secret_key", apiConfig.SecretKey).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {

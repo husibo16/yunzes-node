@@ -13,10 +13,20 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(&userTraffic)
 		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report user traffic failed")
+			// Rollback so the next cycle re-reports.
+			if rbErr := c.server.AddUserTrafficSlice(c.tag, userTraffic); rbErr != nil {
+				log.WithFields(log.Fields{
+					"tag":          c.tag,
+					"report_err":   err,
+					"rollback_err": rbErr,
+				}).Error("Report failed AND rollback failed — traffic lost")
+			} else {
+				log.WithFields(log.Fields{
+					"tag":               c.tag,
+					"err":               err,
+					"rolled_back_count": len(userTraffic),
+				}).Warn("Report failed, traffic rolled back to core for next cycle")
+			}
 		} else {
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 		}

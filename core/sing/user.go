@@ -3,6 +3,7 @@ package sing
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 
 	"github.com/perfect-panel/ppanel-node/api/panel"
 	"github.com/perfect-panel/ppanel-node/common/counter"
@@ -144,6 +145,42 @@ func (b *Sing) GetUserTrafficSlice(tag string, reset bool) ([]panel.UserTraffic,
 		return trafficSlice, nil
 	}
 	return nil, nil
+}
+
+// AddUserTrafficSlice — see xray for semantics. Sing uses uuid as the counter key.
+func (b *Sing) AddUserTrafficSlice(tag string, traffic []panel.UserTraffic) error {
+	if len(traffic) == 0 {
+		return nil
+	}
+	hook := b.hookServer
+	b.users.mapLock.RLock()
+	defer b.users.mapLock.RUnlock()
+
+	v, ok := hook.counter.Load(tag)
+	if !ok {
+		return fmt.Errorf("counter for tag %s not found", tag)
+	}
+	c := v.(*counter.TrafficCounter)
+
+	reverseMap := make(map[int]string, len(b.users.uidMap))
+	for uuid, uid := range b.users.uidMap {
+		reverseMap[uid] = uuid
+	}
+
+	for _, t := range traffic {
+		uuid, ok := reverseMap[t.UID]
+		if !ok {
+			continue
+		}
+		v, ok := c.Counters.Load(uuid)
+		if !ok {
+			continue
+		}
+		ts := v.(*counter.TrafficStorage)
+		ts.UpCounter.Add(t.Upload)
+		ts.DownCounter.Add(t.Download)
+	}
+	return nil
 }
 
 type UserDeleter interface {
