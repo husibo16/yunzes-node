@@ -130,9 +130,57 @@ func (c *Controller) startupLogFields(node *panel.NodeInfo) log.Fields {
 //  7. AddUsers
 //  8. startTasks
 //
-// Steps 3-8 are guarded by deferred rollbacks: any failure undoes the prior
-// successful steps so we never leave a half-built controller behind.
+// Steps 3-8 are guarded by a single deferred rollback closure that
+// (a) recovers from any panic in downstream xray/sing-box code and
+//
+//	converts it to a returned error so the daemon stays alive, and
+//
+// (b) undoes successful steps in reverse order based on per-step bool
+//
+//	flags. Using one closure (instead of multiple stacked defers) avoids
+//	the LIFO-vs-named-return-assignment trap where a panic interrupts the
+//	err assignment, leaving earlier defers to see err==nil and short-
+//	circuit before the panic handler could set it.
 func (c *Controller) Start() (err error) {
+	var (
+		listenerReserved bool
+		limiterAdded     bool
+		addedNode        bool
+	)
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("controller.Start panicked: %v", r)
+			log.WithFields(log.Fields{
+				"logical_tag": c.logicalTag,
+				"core":        c.coreType,
+				"runtime_key": c.runtimeKey,
+				"panic":       r,
+			}).Error("controller.Start panic recovered")
+		}
+		if err == nil {
+			return
+		}
+		// Reverse-order rollback. Every step is gated by its bool so a
+		// failure before a step ran is a no-op.
+		if addedNode {
+			if delErr := c.server.DelNode(c.runtimeKey); delErr != nil {
+				log.WithFields(log.Fields{
+					"logical_tag": c.logicalTag,
+					"core":        c.coreType,
+					"runtime_key": c.runtimeKey,
+					"err":         delErr,
+				}).Error("rollback DelNode failed")
+			}
+		}
+		if limiterAdded {
+			limiter.DeleteLimiter(c.coreType, c.logicalTag)
+			c.limiter = nil
+		}
+		if listenerReserved && c.portRegistry != nil {
+			c.portRegistry.release(c.runtimeKey)
+		}
+	}()
+
 	node, err := c.apiClient.GetNodeInfo()
 	if err != nil {
 		return fmt.Errorf("get node info error: %s", err)
@@ -155,7 +203,6 @@ func (c *Controller) Start() (err error) {
 	}
 	c.runtimeKey = format.RuntimeKey(c.coreType, c.logicalTag)
 
-	// Port registry — fail-fast before any cert / limiter / inbound work.
 	if c.portRegistry != nil {
 		specs, specErr := listenerSpecsFor(node, c.Options.ListenIP)
 		if specErr != nil {
@@ -164,11 +211,7 @@ func (c *Controller) Start() (err error) {
 		if err = c.portRegistry.reserve(c.runtimeKey, c.logicalTag, specs); err != nil {
 			return err
 		}
-		defer func() {
-			if err != nil {
-				c.portRegistry.release(c.runtimeKey)
-			}
-		}()
+		listenerReserved = true
 	}
 
 	security := protocolSecurity(node)
@@ -179,27 +222,8 @@ func (c *Controller) Start() (err error) {
 		}
 	}
 
-	// Rollback ladder: anything past this point that errors must undo the
-	// preceding successful steps.
 	c.limiter = limiter.AddLimiter(c.coreType, c.logicalTag, &c.LimitConfig, c.userList, c.aliveMap)
-	addedNode := false
-	defer func() {
-		if err == nil {
-			return
-		}
-		if addedNode {
-			if delErr := c.server.DelNode(c.runtimeKey); delErr != nil {
-				log.WithFields(log.Fields{
-					"logical_tag": c.logicalTag,
-					"core":        c.coreType,
-					"runtime_key": c.runtimeKey,
-					"err":         delErr,
-				}).Error("rollback DelNode failed")
-			}
-		}
-		limiter.DeleteLimiter(c.coreType, c.logicalTag)
-		c.limiter = nil
-	}()
+	limiterAdded = true
 
 	log.WithFields(c.startupLogFields(node)).Info("Adding node inbound")
 	if err = c.server.AddNode(c.runtimeKey, node, c.Options); err != nil {

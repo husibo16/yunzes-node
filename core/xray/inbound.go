@@ -17,8 +17,22 @@ import (
 	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
-// BuildInbound build Inbound config for different protocol
+// BuildInbound build Inbound config for different protocol.
+//
+// Hardened against nil panel payloads: every dereference of NodeInfo.Common
+// or its protocol-specific sub-struct is gated by a nil-check that turns
+// missing fields into a returned error rather than a runtime panic.
+// Defensive guards also exist around in.StreamSetting before the network
+// switch — a buggy build* helper that forgets to allocate it must not crash
+// the daemon.
 func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
+	if nodeInfo == nil || nodeInfo.Common == nil {
+		return nil, errors.New("buildInbound: nodeInfo or Common is nil")
+	}
+	if option == nil || option.XrayOptions == nil {
+		return nil, errors.New("buildInbound: option or XrayOptions is nil")
+	}
+
 	in := &coreConf.InboundDetourConfig{}
 	var err error
 	var (
@@ -29,16 +43,25 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 
 	switch nodeInfo.Common.Protocol {
 	case "vless":
+		if nodeInfo.Common.Vless == nil {
+			return nil, errors.New("buildInbound: vless protocol but Common.Vless is nil")
+		}
 		port = uint16(nodeInfo.Common.Vless.Port)
 		security = nodeInfo.Common.Vless.Security
 		network = nodeInfo.Common.Vless.Network
 		err = buildVless(option, nodeInfo, in)
 	case "vmess":
+		if nodeInfo.Common.Vmess == nil {
+			return nil, errors.New("buildInbound: vmess protocol but Common.Vmess is nil")
+		}
 		port = uint16(nodeInfo.Common.Vmess.Port)
 		security = nodeInfo.Common.Vmess.Security
 		network = nodeInfo.Common.Vmess.Network
 		err = buildVmess(option, nodeInfo, in)
 	case "trojan":
+		if nodeInfo.Common.Trojan == nil {
+			return nil, errors.New("buildInbound: trojan protocol but Common.Trojan is nil")
+		}
 		port = uint16(nodeInfo.Common.Trojan.Port)
 		security = nodeInfo.Common.Trojan.Security
 		err = buildTrojan(option, nodeInfo, in)
@@ -48,6 +71,9 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 			network = "tcp"
 		}
 	case "shadowsocks":
+		if nodeInfo.Common.Shadowsocks == nil {
+			return nil, errors.New("buildInbound: shadowsocks protocol but Common.Shadowsocks is nil")
+		}
 		port = uint16(nodeInfo.Common.Shadowsocks.Port)
 		security = ""
 		err = buildShadowsocks(option, nodeInfo, in)
@@ -59,19 +85,15 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 	if err != nil {
 		return nil, err
 	}
-	// Set network protocol
-	// Set server port
-	in.PortList = &coreConf.PortList{
-		Range: []coreConf.PortRange{
-			{
-				From: uint32(port),
-				To:   uint32(port),
-			}},
+	if network == "" {
+		network = "tcp"
 	}
-	// Set Listen IP address
+
+	in.PortList = &coreConf.PortList{
+		Range: []coreConf.PortRange{{From: uint32(port), To: uint32(port)}},
+	}
 	ipAddress := net.ParseAddress(option.ListenIP)
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
-	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
 		Enabled:      true,
 		DestOverride: &coreConf.StringList{"http", "tls"},
@@ -80,49 +102,55 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 		sniffingConfig.Enabled = false
 	}
 	in.SniffingConfig = sniffingConfig
+
+	// Defensive: a build* helper may not have allocated StreamSetting
+	// (e.g. vless when TransportConfig is nil). The network switch below
+	// dereferences it, so guarantee it's non-nil here.
+	if in.StreamSetting == nil {
+		t := coreConf.TransportProtocol(network)
+		in.StreamSetting = &coreConf.StreamConfig{Network: &t}
+	}
+
 	switch network {
 	case "tcp":
-		if in.StreamSetting.TCPSettings != nil {
-			in.StreamSetting.TCPSettings.AcceptProxyProtocol = option.XrayOptions.EnableProxyProtocol
-		} else {
-			tcpSetting := &coreConf.TCPConfig{
+		if in.StreamSetting.TCPSettings == nil {
+			in.StreamSetting.TCPSettings = &coreConf.TCPConfig{
 				AcceptProxyProtocol: option.XrayOptions.EnableProxyProtocol,
-			} //Enable proxy protocol
-			in.StreamSetting.TCPSettings = tcpSetting
+			}
+		} else {
+			in.StreamSetting.TCPSettings.AcceptProxyProtocol = option.XrayOptions.EnableProxyProtocol
 		}
 	case "ws", "websocket":
-		if in.StreamSetting.WSSettings != nil {
-			in.StreamSetting.WSSettings.AcceptProxyProtocol = option.XrayOptions.EnableProxyProtocol
-		} else {
+		if in.StreamSetting.WSSettings == nil {
 			in.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
 				AcceptProxyProtocol: option.XrayOptions.EnableProxyProtocol,
-			} //Enable proxy protocol
+			}
+		} else {
+			in.StreamSetting.WSSettings.AcceptProxyProtocol = option.XrayOptions.EnableProxyProtocol
 		}
 	case "httpupgrade":
-		if in.StreamSetting.HTTPUPGRADESettings != nil {
-			in.StreamSetting.HTTPUPGRADESettings.AcceptProxyProtocol = option.XrayOptions.EnableProxyProtocol
-		} else {
+		if in.StreamSetting.HTTPUPGRADESettings == nil {
 			in.StreamSetting.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
 				AcceptProxyProtocol: option.XrayOptions.EnableProxyProtocol,
-			} //Enable proxy protocol
+			}
+		} else {
+			in.StreamSetting.HTTPUPGRADESettings.AcceptProxyProtocol = option.XrayOptions.EnableProxyProtocol
 		}
 	default:
-		socketConfig := &coreConf.SocketConfig{
+		in.StreamSetting.SocketSettings = &coreConf.SocketConfig{
 			AcceptProxyProtocol: option.XrayOptions.EnableProxyProtocol,
 			TFO:                 option.XrayOptions.EnableTFO,
-		} //Enable proxy protocol
-		in.StreamSetting.SocketSettings = socketConfig
+		}
 	}
-	// Set TLS or Reality settings
+
 	switch security {
 	case "tls":
-		// Normal tls
 		if option.CertConfig == nil {
-			return nil, errors.New("the CertConfig is not vail")
+			return nil, errors.New("invalid tls config: missing CertConfig")
 		}
 		switch option.CertConfig.CertMode {
 		case "none", "":
-			break // disable
+			// disable
 		default:
 			in.StreamSetting.Security = "tls"
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
@@ -137,43 +165,77 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 			}
 		}
 	case "reality":
-		// Reality
+		// REALITY only applies to vless today; the protocol switch above
+		// already nil-checked Common.Vless when we entered the vless arm,
+		// but be explicit here so a future caller of this branch from
+		// another protocol doesn't surprise-panic.
+		if nodeInfo.Common.Vless == nil {
+			return nil, errors.New("invalid reality config: not a vless node")
+		}
+		realitySettings, rErr := buildRealitySettings(nodeInfo.Common.Vless)
+		if rErr != nil {
+			return nil, rErr
+		}
 		in.StreamSetting.Security = "reality"
-		v := nodeInfo.Common.Vless
-		dest := v.SecurityConfig.RealityServerAddress
-		if dest == "" {
-			dest = v.SecurityConfig.SNI
-		}
-		//xver, _ := strconv.Atoi(v.SecurityConfig.ProxyProtocol)
-
-		d, err := json.Marshal(fmt.Sprintf(
-			"%s:%d",
-			dest,
-			v.SecurityConfig.RealityServerPort))
-		if err != nil {
-			return nil, fmt.Errorf("marshal reality dest error: %s", err)
-		}
-		in.StreamSetting.REALITYSettings = &coreConf.REALITYConfig{
-			Dest: d,
-			//Xver:        uint64(xver),
-			ServerNames: []string{v.SecurityConfig.SNI},
-			PrivateKey:  v.SecurityConfig.RealityPrivateKey,
-			ShortIds:    []string{v.SecurityConfig.RealityShortId},
-			Mldsa65Seed: v.SecurityConfig.RealityMldsa65seed,
-		}
+		in.StreamSetting.REALITYSettings = realitySettings
 	default:
-		break
+		// cleartext / unknown — leave StreamSetting.Security empty.
 	}
 	in.Tag = tag
 	return in.Build()
 }
 
+// buildRealitySettings validates the reality-relevant SecurityConfig fields
+// and produces a coreConf.REALITYConfig. Every required field is checked
+// before any dereference so a panel response missing security_config (or any
+// of its sub-fields) returns a precise error instead of a nil panic.
+func buildRealitySettings(v *panel.VlessNode) (*coreConf.REALITYConfig, error) {
+	if v.SecurityConfig == nil {
+		return nil, errors.New("invalid reality config: missing security_config")
+	}
+	sc := v.SecurityConfig
+	if sc.SNI == "" {
+		return nil, errors.New("invalid reality config: missing sni / server_name")
+	}
+	if sc.RealityPrivateKey == "" {
+		return nil, errors.New("invalid reality config: missing reality_private_key")
+	}
+	dest := sc.RealityServerAddress
+	if dest == "" {
+		dest = sc.SNI
+	}
+	if dest == "" {
+		return nil, errors.New("invalid reality config: missing reality_server_addr (and sni fallback)")
+	}
+	if sc.RealityServerPort <= 0 || sc.RealityServerPort > 65535 {
+		return nil, fmt.Errorf("invalid reality config: bad reality_server_port=%d", sc.RealityServerPort)
+	}
+	d, err := json.Marshal(fmt.Sprintf("%s:%d", dest, sc.RealityServerPort))
+	if err != nil {
+		return nil, fmt.Errorf("invalid reality config: marshal dest: %s", err)
+	}
+	// xray-core accepts an empty short-id (means the server tolerates any
+	// short-id from clients). Pass through whatever the panel said —
+	// validation of crypto correctness is xray-core's responsibility.
+	return &coreConf.REALITYConfig{
+		Dest:        d,
+		ServerNames: []string{sc.SNI},
+		PrivateKey:  sc.RealityPrivateKey,
+		ShortIds:    []string{sc.RealityShortId},
+		Mldsa65Seed: sc.RealityMldsa65seed,
+	}, nil
+}
+
 func buildVless(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	v := nodeInfo.Common.Vless
-	//Set vless
+	if v == nil {
+		return errors.New("buildVless: Common.Vless is nil")
+	}
+	if config.XrayOptions == nil {
+		return errors.New("buildVless: XrayOptions is nil")
+	}
 	inbound.Protocol = "vless"
 	if config.XrayOptions.EnableFallback {
-		// Set fallback
 		fallbackConfigs, err := buildVlessFallbacks(config.XrayOptions.FallBackConfigs)
 		if err != nil {
 			return err
@@ -187,97 +249,121 @@ func buildVless(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreCon
 		}
 		inbound.Settings = (*json.RawMessage)(&s)
 	} else {
-		var err error
-		s, err := json.Marshal(&coreConf.VLessInboundConfig{
-			Decryption: "none",
-		})
+		s, err := json.Marshal(&coreConf.VLessInboundConfig{Decryption: "none"})
 		if err != nil {
 			return fmt.Errorf("marshal vless config error: %s", err)
 		}
 		inbound.Settings = (*json.RawMessage)(&s)
 	}
-	if v.TransportConfig == nil {
-		return nil
-	}
 
-	t := coreConf.TransportProtocol(v.Network)
+	network := v.Network
+	if network == "" {
+		network = "tcp"
+	}
+	t := coreConf.TransportProtocol(network)
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
-	switch v.Network {
+
+	switch network {
 	case "tcp":
+		// tcp does not need TransportConfig; nil is fine.
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
 	case "ws", "websocket":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 		}
 	case "grpc":
+		serviceName := ""
+		if v.TransportConfig != nil {
+			serviceName = v.TransportConfig.ServiceName
+		}
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
-			ServiceName: v.TransportConfig.ServiceName,
+			ServiceName: serviceName,
 		}
 	case "httpupgrade":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 		}
 	case "splithttp", "xhttp":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 			Mode: "auto",
 		}
 	default:
-		return errors.New("the network type is not vail")
+		return fmt.Errorf("vless: unsupported network type %q", network)
 	}
 	return nil
 }
 
 func buildVmess(_ *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	v := nodeInfo.Common.Vmess
-	// Set vmess
+	if v == nil {
+		return errors.New("buildVmess: Common.Vmess is nil")
+	}
 	inbound.Protocol = "vmess"
-	var err error
 	s, err := json.Marshal(&coreConf.VMessInboundConfig{})
 	if err != nil {
 		return fmt.Errorf("marshal vmess settings error: %s", err)
 	}
 	inbound.Settings = (*json.RawMessage)(&s)
 
-	t := coreConf.TransportProtocol(v.Network)
+	network := v.Network
+	if network == "" {
+		network = "tcp"
+	}
+	t := coreConf.TransportProtocol(network)
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
-	switch v.Network {
+	switch network {
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
 	case "ws", "websocket":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 		}
 	case "grpc":
+		serviceName := ""
+		if v.TransportConfig != nil {
+			serviceName = v.TransportConfig.ServiceName
+		}
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
-			ServiceName: v.TransportConfig.ServiceName,
+			ServiceName: serviceName,
 		}
 	case "httpupgrade":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 		}
 	case "splithttp", "xhttp":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 			Mode: "auto",
 		}
 	default:
-		return errors.New("the network type is not vail")
+		return fmt.Errorf("vmess: unsupported network type %q", network)
 	}
 	return nil
 }
 
 func buildTrojan(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
-	inbound.Protocol = "trojan"
 	v := nodeInfo.Common.Trojan
+	if v == nil {
+		return errors.New("buildTrojan: Common.Trojan is nil")
+	}
+	if config.XrayOptions == nil {
+		return errors.New("buildTrojan: XrayOptions is nil")
+	}
+	inbound.Protocol = "trojan"
 	if config.XrayOptions.EnableFallback {
-		// Set fallback
 		fallbackConfigs, err := buildTrojanFallbacks(config.XrayOptions.FallBackConfigs)
 		if err != nil {
 			return err
@@ -285,10 +371,10 @@ func buildTrojan(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreCo
 		s, err := json.Marshal(&coreConf.TrojanServerConfig{
 			Fallbacks: fallbackConfigs,
 		})
-		inbound.Settings = (*json.RawMessage)(&s)
 		if err != nil {
 			return fmt.Errorf("marshal trojan fallback config error: %s", err)
 		}
+		inbound.Settings = (*json.RawMessage)(&s)
 	} else {
 		s := []byte("{}")
 		inbound.Settings = (*json.RawMessage)(&s)
@@ -303,23 +389,34 @@ func buildTrojan(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreCo
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
 	case "ws", "websocket":
+		host, path := transportHostPath(v.TransportConfig)
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
-			Host: v.TransportConfig.Host,
-			Path: v.TransportConfig.Path,
+			Host: host,
+			Path: path,
 		}
 	case "grpc":
+		serviceName := ""
+		if v.TransportConfig != nil {
+			serviceName = v.TransportConfig.ServiceName
+		}
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
-			ServiceName: v.TransportConfig.ServiceName,
+			ServiceName: serviceName,
 		}
 	default:
-		return errors.New("the network type is not vail")
+		return fmt.Errorf("trojan: unsupported network type %q", network)
 	}
 	return nil
 }
 
 func buildShadowsocks(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
-	inbound.Protocol = "shadowsocks"
 	s := nodeInfo.Common.Shadowsocks
+	if s == nil {
+		return errors.New("buildShadowsocks: Common.Shadowsocks is nil")
+	}
+	if config.XrayOptions == nil {
+		return errors.New("buildShadowsocks: XrayOptions is nil")
+	}
+	inbound.Protocol = "shadowsocks"
 	if err := format.ValidateShadowsocksCipher(s.Cipher, s.ServerKey); err != nil {
 		return err
 	}
@@ -351,11 +448,20 @@ func buildShadowsocks(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *c
 	t := coreConf.TransportProtocol("tcp")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	sets, err := json.Marshal(settings)
-	inbound.Settings = (*json.RawMessage)(&sets)
 	if err != nil {
 		return fmt.Errorf("marshal shadowsocks settings error: %s", err)
 	}
+	inbound.Settings = (*json.RawMessage)(&sets)
 	return nil
+}
+
+// transportHostPath returns Host / Path from a possibly-nil TransportConfig.
+// Centralizes the nil-check so per-protocol builders don't repeat it.
+func transportHostPath(tc *panel.TransportConfig) (host, path string) {
+	if tc == nil {
+		return "", ""
+	}
+	return tc.Host, tc.Path
 }
 
 func buildVlessFallbacks(fallbackConfigs []conf.FallBackConfigForXray) ([]*coreConf.VLessInboundFallback, error) {
