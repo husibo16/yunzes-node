@@ -1,0 +1,37 @@
+# Keep the docker build context lean. Anything excluded here is invisible to
+# the Dockerfile's `COPY .` line.
+
+# VCS metadata — large and irrelevant to the runtime image. The legacy builder
+# previously stuffed all of .git into the build context tar, occasionally
+# tripping I/O errors on slow filesystems (e.g. WSL2 -> /mnt/d).
+.git
+.gitignore
+.gitattributes
+.github
+
+# Local dev / patch artifacts
+*.patch
+patch-backup/
+.vscode
+.idea
+*.swp
+
+# Build outputs that may exist on a developer machine
+/yunzes-node
+/yunzes-node.exe
+/bin/
+/build/
+/build_assets/
+
+# Test caches
+*.test
+*.out
+coverage.txt
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Documentation that doesn't belong in the image
+docs/
+example/
