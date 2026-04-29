@@ -41,6 +41,30 @@ sudo yunzes-node uninstall-full        # 全清；要求二次输入 "DELETE YUN
 
 完整命令清单：`yunzes-node help`。
 
+**彩色输出与 NO_COLOR**
+
+脚本默认输出彩色（步骤青、信息蓝、成功绿、警告黄、错误红、危险红、命令紫）。日志采集 / CI / 重定向到文件场景下脚本自动检测 `! -t 1` 关闭颜色；想强制关闭也可以：
+
+```bash
+NO_COLOR=1 yunzes-node verify
+NO_COLOR=1 yunzes-node fake-test 2>&1 | tee fake-test.log
+```
+
+**自动安装依赖**
+
+`yunzes-node install` 进入 `ensure_dependencies` 阶段会自动检测缺失的 `docker.io / curl / jq / git / tar / iproute2 / python3`，在 Debian / Ubuntu 上提示一次 y/N 后批量 `apt install`，并尝试 `service docker start` / `systemctl start docker`。用户拒绝 y 则中断流程。其他发行版只警告，让你手动装。
+
+**镜像来源 4 选 1**
+
+```
+1) 从 GitHub 拉源码并本地构建        ← 默认推荐, REPO_URL=husibo16/yunzes-node
+2) 使用当前目录源码构建              ← 仅当从源码 checkout 内运行脚本
+3) 拉取远程 Docker 镜像
+4) 手动输入镜像名
+```
+
+源码克隆到 `/opt/yunzes-node/src/`；再次安装时可选 git pull / 复用 / 重新 clone / 退出。
+
 ### 推荐生产端口方案
 
 ```
