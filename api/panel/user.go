@@ -8,8 +8,8 @@ import (
 )
 
 type OnlineUser struct {
-	UID int
-	IP  string
+	UID int    `json:"uid"`
+	IP  string `json:"ip"`
 }
 
 type UserInfo struct {
