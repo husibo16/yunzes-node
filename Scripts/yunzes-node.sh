@@ -20,7 +20,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_VERSION="1.3.1"
+readonly SCRIPT_VERSION="1.3.2"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -347,19 +347,23 @@ print_menu() {
 
 # first_run_pick_language: prompt the operator the very first time they run
 # the menu (no $YUNZES_LANG and no persistent state file). Writes the choice
-# to LOCALE_STATE_FILE and re-executes the script so the new locale takes
-# effect from the very first banner. Non-root operators (who can't write
-# /opt) get a default-zh + hint instead of an interactive prompt.
+# to LOCALE_STATE_FILE and reassigns $LOCALE in-place so subsequent _t calls
+# (which read $LOCALE on every invocation) pick up the new value.
+#
+# We do NOT re-exec the script — exec'ing $SCRIPT_PATH directly fails when
+# the operator invoked the script via `bash /path/to/yunzes-node.sh` and the
+# file does not carry the execute bit. In-place reassign avoids the issue.
+#
+# Non-root operators can't persist (they can't write /opt), so they get a
+# silent default-zh plus a single-line hint instead of an interactive prompt.
 first_run_pick_language() {
     [[ -n "${YUNZES_LANG:-}" ]] && return 0
     [[ -f "$LOCALE_STATE_FILE" ]] && return 0
     if ! is_root; then
-        # Non-root can't persist; just default to zh and tell them how to switch.
         printf "\n  %b首次运行：默认使用中文。 First run: defaulting to Chinese.%b\n" "${C_BOLD_CYAN}" "${C_PLAIN}"
         printf "  %bsudo yunzes-node lang en%b  %b切换到英文 / switch to English%b\n\n" "${C_GREEN}" "${C_PLAIN}" "${C_DIM}" "${C_PLAIN}"
         return 0
     fi
-    # Bilingual prompt — neither side reads $LOCALE since we haven't picked yet.
     printf "\n"
     printf "  %b请选择语言 / Please choose language%b\n" "${C_BOLD_CYAN}" "${C_PLAIN}"
     printf "    %b1)%b %b中文%b\n"   "${C_GREEN}" "${C_PLAIN}" "${C_CYAN}" "${C_PLAIN}"
@@ -369,13 +373,15 @@ first_run_pick_language() {
     read -r choice || true
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     case "${choice:-1}" in
-        2|en|english|英文) echo "en" > "$LOCALE_STATE_FILE" 2>/dev/null ;;
-        *)                 echo "zh" > "$LOCALE_STATE_FILE" 2>/dev/null ;;
+        2|en|english|English|英文)
+            echo "en" > "$LOCALE_STATE_FILE" 2>/dev/null
+            LOCALE=en
+            ;;
+        *)
+            echo "zh" > "$LOCALE_STATE_FILE" 2>/dev/null
+            LOCALE=zh
+            ;;
     esac
-    # Re-exec so the rest of the script reads the new locale via the
-    # top-of-file resolution. exec replaces the process; everything below
-    # is dead code if this runs.
-    exec "$SCRIPT_PATH" menu
 }
 
 cmd_menu() {
