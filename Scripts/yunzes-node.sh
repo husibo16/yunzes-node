@@ -20,7 +20,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.3.1"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -172,16 +172,25 @@ prompt_read() {
 
 prompt_required() {
     # prompt_required "question" "error-msg-zh" "error-msg-en"
-    # Loops until the user enters a non-empty value.
+    # Loops until the user enters a non-empty value OR types q/cancel/取消.
+    # Returns 0 with the value on stdout, or 1 if the user explicitly cancels
+    # so callers can fall back gracefully (e.g. switch CertMode to "none").
     local q="$1" err_zh="$2" err_en="$3" reply
     while true; do
-        printf "%b? %s: %b" "${C_CYAN}" "$q" "${C_PLAIN}" >&2
-        read -r reply || true
-        if [[ -n "$reply" ]]; then
-            echo "$reply"
-            return 0
-        fi
-        print_warn "$(_t "$err_zh" "$err_en")"
+        printf "%b? %s %b(q 取消 / cancel)%b: %b" \
+            "${C_CYAN}" "$q" "${C_DIM}" "${C_CYAN}" "${C_PLAIN}" >&2
+        read -r reply || return 1
+        case "$reply" in
+            q|Q|quit|exit|cancel|取消)
+                return 1 ;;
+            "")
+                print_warn "$(_t "$err_zh" "$err_en")"
+                ;;
+            *)
+                echo "$reply"
+                return 0
+                ;;
+        esac
     done
 }
 
@@ -1623,9 +1632,10 @@ gen_config_smart_mode() {
     case "$http_code" in
         200) ;;
         404)
-            print_warn "$(_t "面板不支持 /v2/server/$server_id 接口（HTTP 404）— 将切换到手动模式" "Panel does not implement /v2/server/$server_id (HTTP 404) — falling back to manual mode")"
+            print_warn "$(_t "面板不支持 /v2/server/$server_id 接口（HTTP 404）— 切换到 /v1 探测模式" "Panel does not implement /v2/server/$server_id (HTTP 404) — switching to /v1 probe mode")"
             rm -f "$body_file"
-            return 2
+            gen_config_probe_v1_mode "$api_host" "$secret_key" "$server_id"
+            return $?
             ;;
         401|403)
             print_fail "$(_t "面板拒绝（HTTP $http_code）— SecretKey 错或权限不足" "Panel rejected (HTTP $http_code) — wrong SecretKey or insufficient privilege")"
@@ -1712,6 +1722,109 @@ gen_config_smart_mode() {
     return 0
 }
 
+# gen_config_probe_v1_mode: panel doesn't implement /v2/server/{id}, so we
+# fall back to per-protocol probing via /v1/server/config?protocol=X&
+# server_id=Y. The operator gives a list of NodeIDs (their actual panel
+# server IDs), and the script curls all 7 supported protocols against each
+# one. Only the (NodeID, protocol) pairs that return HTTP 200 land in the
+# generated Nodes[] array. The operator NEVER types NodeType / CertMode
+# manually — discovery is fully panel-driven.
+#
+# Returns 0 on success (config written), 1 on failure (panel unreachable
+# or operator cancelled).
+gen_config_probe_v1_mode() {
+    local api_host="$1" secret_key="$2" default_sid="$3"
+
+    print_info "$(_t '请列出你的面板上配置过的 NodeID（逗号分隔，例: 1,2,5,9）。脚本会自动探测每个 NodeID 上配的协议。' \
+                    'List the NodeIDs configured on your panel (comma-separated, e.g. 1,2,5,9). The script will probe each NodeID for all supported protocols automatically.')"
+    local raw
+    raw=$(prompt_required "$(_t "NodeID 列表（默认 $default_sid）" "NodeID list (default $default_sid)")" \
+                          "至少需要一个 NodeID" "At least one NodeID required") || {
+        print_warn "$(_t '已取消探测' 'Probe cancelled')"
+        return 1
+    }
+    [[ -z "$raw" ]] && raw="$default_sid"
+    raw="${raw// /}"  # strip spaces
+
+    local probe_protocols=(vless vmess trojan shadowsocks hysteria2 tuic anytls)
+    local nodes_json="[]"
+    local found=0 net_fail=0
+    local sid proto code
+
+    while IFS=',' read -ra _SIDS <<<"$raw"; do
+        for sid in "${_SIDS[@]}"; do
+            [[ -z "$sid" ]] && continue
+            if ! [[ "$sid" =~ ^[0-9]+$ ]]; then
+                print_warn "$(_t "跳过非数字 NodeID: $sid" "Skipping non-numeric NodeID: $sid")"
+                continue
+            fi
+            print_step "$(_t "探测 NodeID=$sid 上的协议" "Probing NodeID=$sid for protocols")"
+            for proto in "${probe_protocols[@]}"; do
+                local url="${api_host%/}/v1/server/config?protocol=${proto}&server_id=${sid}&secret_key=${secret_key}"
+                code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "$url" 2>/dev/null || echo 000)
+                case "$code" in
+                    200)
+                        print_ok "$(_t "  ✓ NodeID=$sid 协议=$proto" "  ✓ NodeID=$sid protocol=$proto")"
+                        found=$((found+1))
+                        local node
+                        node=$(jq -n \
+                            --arg ah "$api_host" --arg ak "$secret_key" \
+                            --argjson nid "$sid" --arg nt "$proto" \
+                            '{ApiHost:$ah, ApiKey:$ak, NodeID:$nid, NodeType:$nt, Timeout:30, ListenIP:"0.0.0.0", CertConfig:{CertMode:"none"}}')
+                        nodes_json=$(echo "$nodes_json" | jq --argjson n "$node" '. + [$n]')
+                        ;;
+                    404|"") ;;
+                    401|403)
+                        print_warn "$(_t "  $proto: HTTP $code (鉴权失败 — SecretKey 错或权限不足)" "  $proto: HTTP $code (auth failed)")"
+                        ;;
+                    000)
+                        print_fail "$(_t "  无法连接面板 $api_host — 终止探测" "  Cannot reach panel $api_host — abort probe")"
+                        net_fail=1
+                        break 2
+                        ;;
+                    *)
+                        print_info "$(_t "  $proto: HTTP $code" "  $proto: HTTP $code")"
+                        ;;
+                esac
+            done
+        done
+        break
+    done
+
+    if (( net_fail )); then
+        return 1
+    fi
+    if (( found == 0 )); then
+        print_fail "$(_t "在给定的 NodeID 上没有探测到任何协议" "No protocols discovered on the given NodeIDs")"
+        print_fix "$(_t "请确认面板后台真的配了节点；或换一个 NodeID 范围" "Verify the panel has nodes configured; or try different NodeIDs")"
+        return 1
+    fi
+
+    print_separator
+    print_ok "$(_t "探测完成：发现 $found 个有效节点" "Probe complete: $found valid nodes")"
+    echo "$nodes_json" | jq -r '.[] | "  NodeID=\(.NodeID)  协议=\(.NodeType)"'
+    print_separator
+
+    if ! confirm "$(_t "确认使用以上 $found 个节点（CertMode 默认 none，可日后用 yunzes-node edit-config 单独加 TLS）" \
+                       "Confirm using $found nodes (CertMode defaults to none; add TLS later via yunzes-node edit-config)")" y; then
+        return 1
+    fi
+
+    local final
+    final=$(jq -n --argjson nodes "$nodes_json" '{
+        Log: {Level: "info"},
+        Cores: [{Type: "xray"}, {Type: "sing"}],
+        Nodes: $nodes
+    }')
+    echo "$final" > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    print_ok "$(_t "已写入 $CONFIG_FILE （/v1 探测模式：$found 个节点，全部 CertMode=none）" \
+                  "Wrote $CONFIG_FILE (v1 probe mode: $found nodes, all CertMode=none)")"
+    print_warn "$(_t "若节点本身需要 TLS（hysteria2 / tuic / anytls / vless+tls）：用 yunzes-node edit-config 给该节点的 CertConfig 加 CertMode=self/http + CertDomain；当前 cleartext 模式下 TLS 协议会跑但客户端无法验证证书" \
+                    "If a node requires TLS (hysteria2 / tuic / anytls / vless+tls): use yunzes-node edit-config to add CertMode=self/http + CertDomain to that node's CertConfig; under current cleartext mode TLS protocols will run but clients cannot verify the cert")"
+    return 0
+}
+
 # gen_config_interactive: now enforces non-empty CertDomain when CertMode
 # requires it, defaulting to a node-keyed cert path with a hyphen separator
 # (vless-1.crt vs the previous vless1.crt) for readability.
@@ -1752,22 +1865,35 @@ gen_config_interactive() {
             cert_mode=$(prompt_read "CertMode" "self")
             case "$cert_mode" in
                 http|dns|file|self)
-                    cert_domain=$(prompt_required "CertDomain" \
-                        "CertDomain 不能为空，否则 EnsureCertificate 会拒绝并触发容器 restart 循环。如需 cleartext，请改 CertMode 为 none。" \
-                        "CertDomain must be non-empty, otherwise EnsureCertificate rejects it and the container will restart-loop. For cleartext, set CertMode to none.")
-                    cert_file=$(prompt_read   "CertFile"  "/etc/yunzes-node/certs/${node_type}-${node_id}.crt")
-                    key_file=$(prompt_read    "KeyFile"   "/etc/yunzes-node/certs/${node_type}-${node_id}.key")
-                    if [[ "$cert_mode" =~ ^(http|dns)$ ]]; then
-                        email=$(prompt_required "Email (ACME 注册用)" \
-                            "Email 不能为空（ACME 必填）" \
-                            "Email is required for ACME")
-                    else
-                        email=""
+                    local _cancelled=0
+                    if ! cert_domain=$(prompt_required "CertDomain" \
+                        "CertDomain 不能为空，否则 EnsureCertificate 会拒绝并触发容器重启循环。如需无加密，请输入 q 回退到 CertMode=none" \
+                        "CertDomain must be non-empty, otherwise EnsureCertificate rejects it. Type q to fall back to CertMode=none"); then
+                        print_warn "$(_t "用户取消 CertDomain — 该节点回退到 CertMode=none（cleartext）" \
+                                        "User cancelled CertDomain — falling back to CertMode=none (cleartext)")"
+                        cert_obj='{"CertMode":"none"}'
+                        _cancelled=1
                     fi
-                    cert_obj=$(jq -n \
-                        --arg m "$cert_mode" --arg d "$cert_domain" \
-                        --arg cf "$cert_file" --arg kf "$key_file" --arg e "$email" \
-                        '{CertMode:$m, CertDomain:$d, CertFile:$cf, KeyFile:$kf, Email:$e, RenewBeforeDays:30}') ;;
+                    if (( ! _cancelled )); then
+                        cert_file=$(prompt_read   "CertFile"  "/etc/yunzes-node/certs/${node_type}-${node_id}.crt")
+                        key_file=$(prompt_read    "KeyFile"   "/etc/yunzes-node/certs/${node_type}-${node_id}.key")
+                        if [[ "$cert_mode" =~ ^(http|dns)$ ]]; then
+                            if ! email=$(prompt_required "Email (ACME 注册用)" \
+                                "Email 不能为空（ACME 必填），输入 q 回退到自签证书" \
+                                "Email is required for ACME, type q to fall back to self-signed"); then
+                                print_warn "$(_t "用户取消 Email — 该节点 CertMode 改为 self（自签）" \
+                                                "User cancelled Email — switching CertMode to self for this node")"
+                                cert_mode="self"
+                            fi
+                        else
+                            email=""
+                        fi
+                        cert_obj=$(jq -n \
+                            --arg m "$cert_mode" --arg d "$cert_domain" \
+                            --arg cf "$cert_file" --arg kf "$key_file" --arg e "${email:-}" \
+                            '{CertMode:$m, CertDomain:$d, CertFile:$cf, KeyFile:$kf, Email:$e, RenewBeforeDays:30}')
+                    fi
+                    ;;
                 none|"") cert_obj='{"CertMode":"none"}' ;;
                 *) print_warn "$(_t "未知 CertMode '$cert_mode'，回退到 none" "Unknown CertMode '$cert_mode', falling back to none")"
                    cert_obj='{"CertMode":"none"}' ;;
