@@ -5,6 +5,8 @@ import (
 
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type OnlineUser struct {
@@ -84,26 +86,44 @@ func (c *Client) GetUserList() ([]UserInfo, error) {
 }
 
 func (c *Client) GetUserAlive() (map[int]int, error) {
-	c.AliveMap = &AliveMap{}
-	c.AliveMap.Alive = make(map[int]int)
-	/*const path = "/v1/server/alivelist"
-	r, err := c.client.R().
+	const path = "/v1/server/alivelist"
+	c.AliveMap = &AliveMap{Alive: make(map[int]int)}
+
+	r, err := c.Client.R().
 		ForceContentType("application/json").
 		Get(path)
-	if err != nil || r.StatusCode() >= 399 {
-		c.AliveMap.Alive = make(map[int]int)
+	if err != nil || r == nil {
+		log.WithFields(log.Fields{
+			"path": path,
+			"err":  err,
+		}).Warn("alivelist request failed; falling back to empty map")
+		return c.AliveMap.Alive, nil
 	}
-	if r == nil || r.RawResponse == nil {
-		fmt.Printf("received nil response or raw response")
-		c.AliveMap.Alive = make(map[int]int)
+	if r.StatusCode() == 304 {
+		return c.AliveMap.Alive, nil
 	}
-	defer r.RawResponse.Body.Close()
-	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		//fmt.Printf("unmarshal user alive list error: %s", err)
-		c.AliveMap.Alive = make(map[int]int)
+	if r.StatusCode() >= 400 {
+		log.WithFields(log.Fields{
+			"path":   path,
+			"status": r.StatusCode(),
+			"body":   string(r.Body()),
+		}).Warn("alivelist returned non-2xx; falling back to empty map")
+		return c.AliveMap.Alive, nil
 	}
-	*/
-	return c.AliveMap.Alive, nil
+	body := &AliveMap{}
+	if err := json.Unmarshal(r.Body(), body); err != nil {
+		log.WithFields(log.Fields{
+			"path": path,
+			"err":  err,
+		}).Warn("alivelist response unmarshal failed; falling back to empty map")
+		return c.AliveMap.Alive, nil
+	}
+	if body.Alive == nil {
+		log.WithField("path", path).Warn("alivelist response missing 'alive' field; falling back to empty map")
+		return c.AliveMap.Alive, nil
+	}
+	c.AliveMap = body
+	return body.Alive, nil
 }
 
 type ServerPushUserTrafficRequest struct {
