@@ -41,9 +41,23 @@ sudo yunzes-node uninstall-full        # 全清；要求二次输入 "DELETE YUN
 
 完整命令清单：`yunzes-node help`。
 
+**智能模式 (panel-driven, 推荐)**
+
+`yunzes-node install` / `gen-config` 现在默认走智能模式：
+
+```
+请选择安装模式:
+  1) 智能模式 — 由面板提供节点列表 (推荐)
+  2) 手动模式 — 逐个输入 NodeID + NodeType
+```
+
+智能模式只需输入 `ApiHost` + `SecretKey` + `ServerID`（一个），脚本探测 `${ApiHost}/v2/server/${ServerID}?secret_key=...`，由面板返回该 ServerID 上配置的所有协议（vless / shadowsocks / hysteria2 / ...）。生成的 config 是 StartNodes 风格（顶层 `Api` 块 + 空 `Nodes` 数组），运行时由面板下发每协议的端口、cipher、security 等参数，本地无需手动维护 `NodeID/NodeType/CertConfig` 列表。
+
+如果面板不支持 `/v2/server/{ID}`（HTTP 404），脚本自动回退到手动模式。
+
 **国际化 (中文 / English)**
 
-**默认中文。** 脚本不看 `LANG`（绝大多数 VPS 镜像都默认 `LANG=en_US.UTF-8`，但那不代表用户偏好英文）。三种切语言方式：
+**默认中文。** 第一次跑 `yunzes-node` 菜单时会交互提示选语言（root 写到 `/opt/yunzes-node/state/locale`），之后保持。脚本不看系统 `LANG`（绝大多数 VPS 默认 `LANG=en_US.UTF-8`，但那不代表用户偏好英文）。三种切语言方式：
 
 ```bash
 # 1) 一次性切（环境变量优先级最高）

@@ -20,7 +20,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.3.0"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -67,7 +67,8 @@ elif [[ -r "$LOCALE_STATE_FILE" ]]; then
 else
     LOCALE=zh
 fi
-readonly LOCALE
+# LOCALE is intentionally NOT readonly so the first-run language picker
+# (cmd_menu) can persist a new choice and re-exec to pick it up.
 
 # _t "zh-text" "en-text" — emit the text matching $LOCALE, no trailing
 # newline. Both arguments are required so a maintainer always sees both
@@ -320,14 +321,14 @@ print_menu() {
     print_menu_item 11 "$(_t '编辑配置文件'                          'Edit config')"
     print_menu_item 12 "$(_t '查看当前配置 (隐藏 ApiKey)'            'Show config (ApiKey masked)')"
     print_menu_item 13 "$(_t '生成配置模板'                          'Generate config template')"
-    print_menu_item 14 "$(_t '测试连接 panel server'                 'Test panel API reachability')"
+    print_menu_item 14 "$(_t '测试连接面板服务器'                    'Test panel API reachability')"
     print_menu_item 15 "$(_t '查看监听端口'                          'Show listening ports')"
     print_menu_item 16 "$(_t '查看 Docker 容器信息'                  'Show Docker container info')"
     print_menu_item 17 "$(_t '备份当前配置'                          'Backup current config')"
     print_menu_item 18 "$(_t '回滚到上一个备份'                      'Rollback to a backup')"
     print_menu_item 19 "$(_t '清理旧镜像'                            'Cleanup old images')"   danger
-    print_menu_item 20 "$(_t '运行 fake panel 四协议验证'            'Run fake-panel 4-protocol test')"
-    print_menu_item 21 "$(_t '停止 fake panel'                       'Stop fake panel')"
+    print_menu_item 20 "$(_t '运行模拟面板四协议验证'                'Run fake-panel 4-protocol test')"
+    print_menu_item 21 "$(_t '停止模拟面板'                          'Stop fake panel')"
     print_menu_item 22 "$(_t '卸载程序，保留配置和证书'              'Uninstall (keep config + certs)')"      danger
     print_menu_item 23 "$(_t '完全卸载（删除配置 + 证书）'           'Uninstall FULL (wipe everything)')"     danger
     print_menu_item 24 "$(_t "安装/更新命令入口 ${INSTALLED_PATH}"   "Install/update command entry ${INSTALLED_PATH}")"
@@ -335,7 +336,41 @@ print_menu() {
     print_separator
 }
 
+# first_run_pick_language: prompt the operator the very first time they run
+# the menu (no $YUNZES_LANG and no persistent state file). Writes the choice
+# to LOCALE_STATE_FILE and re-executes the script so the new locale takes
+# effect from the very first banner. Non-root operators (who can't write
+# /opt) get a default-zh + hint instead of an interactive prompt.
+first_run_pick_language() {
+    [[ -n "${YUNZES_LANG:-}" ]] && return 0
+    [[ -f "$LOCALE_STATE_FILE" ]] && return 0
+    if ! is_root; then
+        # Non-root can't persist; just default to zh and tell them how to switch.
+        printf "\n  %b首次运行：默认使用中文。 First run: defaulting to Chinese.%b\n" "${C_BOLD_CYAN}" "${C_PLAIN}"
+        printf "  %bsudo yunzes-node lang en%b  %b切换到英文 / switch to English%b\n\n" "${C_GREEN}" "${C_PLAIN}" "${C_DIM}" "${C_PLAIN}"
+        return 0
+    fi
+    # Bilingual prompt — neither side reads $LOCALE since we haven't picked yet.
+    printf "\n"
+    printf "  %b请选择语言 / Please choose language%b\n" "${C_BOLD_CYAN}" "${C_PLAIN}"
+    printf "    %b1)%b %b中文%b\n"   "${C_GREEN}" "${C_PLAIN}" "${C_CYAN}" "${C_PLAIN}"
+    printf "    %b2)%b %bEnglish%b\n" "${C_GREEN}" "${C_PLAIN}" "${C_CYAN}" "${C_PLAIN}"
+    printf "  %b? [1]: %b" "${C_CYAN}" "${C_PLAIN}"
+    local choice
+    read -r choice || true
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    case "${choice:-1}" in
+        2|en|english|英文) echo "en" > "$LOCALE_STATE_FILE" 2>/dev/null ;;
+        *)                 echo "zh" > "$LOCALE_STATE_FILE" 2>/dev/null ;;
+    esac
+    # Re-exec so the rest of the script reads the new locale via the
+    # top-of-file resolution. exec replaces the process; everything below
+    # is dead code if this runs.
+    exec "$SCRIPT_PATH" menu
+}
+
 cmd_menu() {
+    first_run_pick_language
     while true; do
         clear || true
         print_banner
@@ -387,7 +422,7 @@ _pcfail() { print_error   "$1"; PRECHECK_FAIL=$((PRECHECK_FAIL+1)); }
 reset_precheck_counters() { PRECHECK_PASS=0; PRECHECK_WARN=0; PRECHECK_FAIL=0; }
 
 basic_precheck() {
-    print_step "$(_t 'PreCheck: 基础环境' 'PreCheck: basic environment')"
+    print_step "$(_t '预检: 基础环境' 'PreCheck: basic environment')"
     if is_root; then
         _pcok "$(_t '运行用户：root' 'Running as: root')"
     else
@@ -419,7 +454,7 @@ DEPENDENCIES=(curl jq tar git ss python3)
 DEP_PACKAGES=(curl jq tar git iproute2 python3)
 
 dependency_precheck() {
-    print_step "$(_t 'PreCheck: CLI 依赖' 'PreCheck: CLI dependencies')"
+    print_step "$(_t '预检: 命令行依赖' 'PreCheck: CLI dependencies')"
     local tool
     for tool in "${DEPENDENCIES[@]}"; do
         if command -v "$tool" >/dev/null 2>&1; then
@@ -437,7 +472,7 @@ ensure_dependencies() {
         print_warn "$(_t '非 Debian/Ubuntu 系统，跳过自动安装；请手动确保依赖已就绪' 'Not Debian/Ubuntu — skipping auto-install; ensure deps manually')"
         return 0
     fi
-    print_step "$(_t 'ensure_dependencies: 检查并安装必需依赖' 'ensure_dependencies: checking and installing required deps')"
+    print_step "$(_t '依赖检查与安装' 'Dependency check and install')"
     local missing=() i
     for i in "${!DEPENDENCIES[@]}"; do
         local tool="${DEPENDENCIES[$i]}"
@@ -495,7 +530,7 @@ ensure_dependencies() {
 }
 
 docker_precheck() {
-    print_step "$(_t 'PreCheck: Docker' 'PreCheck: Docker')"
+    print_step "$(_t '预检: Docker' 'PreCheck: Docker')"
     detect_docker_state
     case $? in
         0)  _pcok   "$(_t 'Docker 可用且当前用户能调用 docker ps' 'Docker reachable; current user can run docker ps')" ;;
@@ -527,7 +562,7 @@ docker_precheck() {
 }
 
 file_precheck() {
-    print_step "$(_t 'PreCheck: 文件与目录' 'PreCheck: files and directories')"
+    print_step "$(_t '预检: 文件与目录' 'PreCheck: files and directories')"
     local d
     for d in "$CONFIG_DIR" "$CERTS_DIR" "$BACKUP_DIR"; do
         if [[ -d "$d" ]]; then _pcok "$(_t "目录存在：$d" "Directory exists: $d")"
@@ -574,12 +609,12 @@ precheck() {
     docker_precheck
     file_precheck
     echo
-    print_info "$(_t 'PreCheck 汇总:' 'PreCheck summary:')"
+    print_info "$(_t '预检汇总:' 'PreCheck summary:')"
     printf "  %bPASS%b: %b%d%b\n" "${C_GREEN}"  "${C_PLAIN}" "${C_GREEN}"  "$PRECHECK_PASS" "${C_PLAIN}"
     printf "  %bWARN%b: %b%d%b\n" "${C_YELLOW}" "${C_PLAIN}" "${C_YELLOW}" "$PRECHECK_WARN" "${C_PLAIN}"
     printf "  %bFAIL%b: %b%d%b\n" "${C_RED}"    "${C_PLAIN}" "${C_RED}"    "$PRECHECK_FAIL" "${C_PLAIN}"
     if (( PRECHECK_FAIL > 0 )); then
-        print_fail "$(_t 'PreCheck 不通过，安装/升级流程中断。修完上面的 [FAIL] 项再重试。' 'PreCheck failed. Fix [FAIL] items above then retry.')"
+        print_fail "$(_t '预检不通过，安装/升级流程中断。修完上面的 [FAIL] 项再重试。' 'PreCheck failed. Fix [FAIL] items above then retry.')"
         return 1
     fi
     return 0
@@ -635,11 +670,28 @@ validate_config() {
         print_fail "$(_t 'config.json 非合法 JSON' 'config.json not valid JSON')"
         return 1
     fi
-    print_step "$(_t '配置体检 (validate_config)' 'Config sanity check (validate_config)')"
+    print_step "$(_t '配置体检' 'Config sanity check')"
     local errors=0 warns=0 total
     total=$(jq '.Nodes | length // 0' "$CONFIG_FILE")
+
+    # Smart mode detection: top-level .Api block populated AND .Nodes empty
+    # implies cmd/server.go will route through nodes.StartNodes (panel-driven
+    # multi-protocol). Per-node validation does not apply — the panel decides
+    # NodeType / Cert / Port at runtime.
+    local api_host api_server_id api_secret
+    api_host=$(jq    -r '.Api.ApiHost   // ""' "$CONFIG_FILE")
+    api_server_id=$(jq -r '.Api.ServerID  // 0'  "$CONFIG_FILE")
+    api_secret=$(jq  -r '.Api.SecretKey // ""' "$CONFIG_FILE")
+    if [[ -n "$api_host" && "$api_server_id" != "0" && -n "$api_secret" && "$total" == "0" ]]; then
+        print_ok "$(_t "智能模式：ApiHost=$api_host  ServerID=$api_server_id" \
+                       "Smart mode: ApiHost=$api_host  ServerID=$api_server_id")"
+        print_ok "$(_t '配置体检通过（智能模式由面板下发协议参数，本地无需 NodeID/NodeType 校验）' \
+                       'Config validation passed (smart mode — panel supplies per-protocol fields)')"
+        return 0
+    fi
+
     if (( total == 0 )); then
-        print_fail "$(_t '配置中没有任何节点 (.Nodes 为空)' 'No nodes defined (.Nodes is empty)')"
+        print_fail "$(_t '配置中既无 .Nodes 也无 .Api 智能模式' 'No .Nodes entries and no .Api smart-mode block')"
         return 1
     fi
     local seen_ids=()
@@ -706,7 +758,46 @@ validate_config() {
 preflight_panel_check() {
     [[ -f "$CONFIG_FILE" ]] || return 0
     jq empty "$CONFIG_FILE" 2>/dev/null || return 0
-    print_step "$(_t '预检: panel API 可达性' 'Preflight: panel API reachability')"
+    print_step "$(_t '预检: 面板 API 可达性' 'Preflight: panel API reachability')"
+
+    # Smart mode: probe /v2/server/{id} once instead of per-node /v1.
+    local s_host s_sid s_key s_nodes
+    s_host=$(jq -r '.Api.ApiHost   // ""' "$CONFIG_FILE")
+    s_sid=$(jq  -r '.Api.ServerID  // 0'  "$CONFIG_FILE")
+    s_key=$(jq  -r '.Api.SecretKey // ""' "$CONFIG_FILE")
+    s_nodes=$(jq '.Nodes | length // 0'    "$CONFIG_FILE")
+    if [[ -n "$s_host" && "$s_sid" != "0" && -n "$s_key" && "$s_nodes" == "0" ]]; then
+        local url_safe="${s_host%/}/v2/server/${s_sid}?secret_key=***"
+        print_cmd "curl -s --connect-timeout 5 $url_safe"
+        local code
+        code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 \
+                "${s_host%/}/v2/server/${s_sid}?secret_key=${s_key}" || echo 000)
+        case "$code" in
+            200) print_ok "$(_t "面板 /v2/server/$s_sid: HTTP 200" "panel /v2/server/$s_sid: HTTP 200")"; return 0 ;;
+            401|403)
+                print_fail "$(_t "面板 /v2/server/$s_sid: HTTP $code — SecretKey 错或权限不足" "panel /v2/server/$s_sid: HTTP $code — wrong SecretKey")"
+                ;;
+            404)
+                print_fail "$(_t "面板 /v2/server/$s_sid: HTTP 404 — 面板不支持智能模式" "panel /v2/server/$s_sid: HTTP 404 — panel does not implement smart mode")"
+                ;;
+            5*)
+                print_warn "$(_t "面板 /v2/server/$s_sid: HTTP $code — 服务端错误" "panel /v2/server/$s_sid: HTTP $code — server error")"
+                ;;
+            000|"")
+                print_fail "$(_t "无法连接面板 $s_host" "Cannot reach panel $s_host")"
+                ;;
+            *)
+                print_info "$(_t "面板 /v2/server/$s_sid: HTTP $code" "panel /v2/server/$s_sid: HTTP $code")"
+                ;;
+        esac
+        if [[ "$code" != "200" ]]; then
+            if ! confirm "$(_t '是否仍然继续启动 (Y/n)' 'Continue starting anyway (Y/n)')" y; then
+                return 1
+            fi
+        fi
+        return 0
+    fi
+
     local total
     total=$(jq '.Nodes | length // 0' "$CONFIG_FILE")
     local idx host node_id ntype path code key
@@ -725,7 +816,7 @@ preflight_panel_check() {
         code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "$path" || true)
         case "$code" in
             200)
-                print_ok "$(_t "节点 #$idx ($ntype/$node_id): HTTP 200 — panel 返回节点配置" "Node #$idx ($ntype/$node_id): HTTP 200 — panel returns node config")"
+                print_ok "$(_t "节点 #$idx ($ntype/$node_id): HTTP 200 — 面板返回节点配置" "Node #$idx ($ntype/$node_id): HTTP 200 — panel returns node config")"
                 ;;
             301|302|303|307|308)
                 print_warn "$(_t "节点 #$idx: HTTP $code 重定向 — 检查 ApiHost 是否带 https://" "Node #$idx: HTTP $code redirect — check ApiHost protocol")"
@@ -734,24 +825,24 @@ preflight_panel_check() {
                 print_warn "$(_t "节点 #$idx: HTTP $code — ApiKey 错误或权限不足" "Node #$idx: HTTP $code — wrong ApiKey or insufficient privilege")"
                 ;;
             404)
-                print_fail "$(_t "节点 #$idx: HTTP 404 — 路径或 NodeID 不存在；请确认 panel 与 yunzes-node 的 API 兼容（/v1/server/config）" \
+                print_fail "$(_t "节点 #$idx: HTTP 404 — 路径或 NodeID 不存在；请确认面板与 yunzes-node 的 API 兼容（/v1/server/config）" \
                                 "Node #$idx: HTTP 404 — path or NodeID not found; ensure panel speaks the /v1/server/config API")"
                 fatal=$((fatal+1))
                 ;;
             5*)
-                print_warn "$(_t "节点 #$idx: HTTP $code — panel 内部错误" "Node #$idx: HTTP $code — panel internal error")"
+                print_warn "$(_t "节点 #$idx: HTTP $code — 面板内部错误" "Node #$idx: HTTP $code — panel internal error")"
                 ;;
             000|"")
                 print_fail "$(_t "节点 #$idx: 无法连接 $host" "Node #$idx: cannot connect to $host")"
                 fatal=$((fatal+1))
                 ;;
             *)
-                print_info "$(_t "节点 #$idx: HTTP $code (具体含义看 panel 文档)" "Node #$idx: HTTP $code (see your panel docs)")"
+                print_info "$(_t "节点 #$idx: HTTP $code (具体含义参考面板文档)" "Node #$idx: HTTP $code (see your panel docs)")"
                 ;;
         esac
     done
     if (( fatal > 0 )); then
-        print_warn "$(_t "panel 预检有 $fatal 个 FAIL — 容器启动后大概率出现 \"Run nodes failed\" 并触发 restart 循环" \
+        print_warn "$(_t "面板预检有 $fatal 项失败 — 容器启动后大概率出现 \"Run nodes failed\" 并触发重启循环" \
                         "panel preflight has $fatal FAIL(s) — container will likely log 'Run nodes failed' and restart-loop")"
         if ! confirm "$(_t '是否仍然继续启动 (Y/n)' 'Continue starting anyway (Y/n)')" y; then
             return 1
@@ -884,7 +975,7 @@ ensure_dirs() {
 # -----------------------------------------------------------------------------
 verify_basic() {
     local pass=0 myfail=0
-    print_step "$(_t 'Verify L1: 基础' 'Verify L1: basics')"
+    print_step "$(_t '验证 L1: 基础' 'Verify L1: basics')"
     if container_running; then
         print_ok "$(_t "容器 $NAME 运行中" "Container $NAME running")"; pass=$((pass+1))
         # Restart-loop detector: if a container has restarted >=3 times in
@@ -971,7 +1062,7 @@ _listen_active() {
 
 verify_network() {
     local pass=0 myfail=0 mywarn=0
-    print_step "$(_t 'Verify L2: 网络' 'Verify L2: network')"
+    print_step "$(_t '验证 L2: 网络' 'Verify L2: network')"
     local mode
     mode=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$NAME" 2>/dev/null || true)
     if [[ "$mode" == "host" ]]; then
@@ -1034,7 +1125,7 @@ verify_network() {
 
 verify_business() {
     local pass=0 myfail=0 mywarn=0
-    print_step "$(_t 'Verify L3: 业务' 'Verify L3: business')"
+    print_step "$(_t '验证 L3: 业务' 'Verify L3: business')"
     if [[ -f "$CONFIG_FILE" ]] && jq empty "$CONFIG_FILE" 2>/dev/null; then
         local hosts h code
         mapfile -t hosts < <(jq -r '.Nodes[]?.ApiHost // empty' "$CONFIG_FILE" | sort -u)
@@ -1042,16 +1133,16 @@ verify_business() {
             [[ -z "$h" ]] && continue
             code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "$h" || true)
             case "$code" in
-                2*|3*) print_ok   "$(_t "panel 可达：$h  HTTP $code" "panel reachable: $h  HTTP $code")"; pass=$((pass+1)) ;;
-                401|403) print_warn "$(_t "panel 401/403：$h  鉴权问题" "panel 401/403: $h  auth issue")"; mywarn=$((mywarn+1)) ;;
-                404) print_warn "$(_t "panel 404：$h  路径可能不对" "panel 404: $h  wrong path?")"; mywarn=$((mywarn+1)) ;;
-                5*) print_fail "$(_t "panel $code：$h  服务端错误" "panel $code: $h  server error")"; myfail=$((myfail+1)) ;;
+                2*|3*) print_ok   "$(_t "面板可达：$h  HTTP $code" "panel reachable: $h  HTTP $code")"; pass=$((pass+1)) ;;
+                401|403) print_warn "$(_t "面板 401/403：$h  鉴权问题" "panel 401/403: $h  auth issue")"; mywarn=$((mywarn+1)) ;;
+                404) print_warn "$(_t "面板 404：$h  路径可能不对" "panel 404: $h  wrong path?")"; mywarn=$((mywarn+1)) ;;
+                5*) print_fail "$(_t "面板 $code：$h  服务端错误" "panel $code: $h  server error")"; myfail=$((myfail+1)) ;;
                 000|"") print_fail "$(_t "无法连接：$h" "Cannot reach: $h")"; myfail=$((myfail+1)) ;;
-                *) print_info "$(_t "panel $code：$h" "panel $code: $h")" ;;
+                *) print_info "$(_t "面板 $code：$h" "panel $code: $h")" ;;
             esac
         done
     else
-        print_warn "$(_t '无可用 config.json，跳过 panel 探活' 'No config.json, skipping panel probe')"; mywarn=$((mywarn+1))
+        print_warn "$(_t '无可用 config.json，跳过面板探活' 'No config.json, skipping panel probe')"; mywarn=$((mywarn+1))
     fi
     local logs
     logs="$(docker logs --tail 500 "$NAME" 2>&1 || true)"
@@ -1112,21 +1203,15 @@ cmd_install() {
                 local b
                 b=$(backup_now)
                 print_ok "$(_t "已备份到 $b" "Backed up to $b")"
-                gen_config_template "$CONFIG_FILE"
-                if confirm "$(_t '是否进入交互式生成 (推荐)' 'Enter interactive generation (recommended)')" y; then
-                    gen_config_interactive
-                fi ;;
+                cmd_gen_config ;;
             3) print_info "$(_t '用户取消' 'User cancelled')"; return 0 ;;
             *) print_warn "$(_t '无效选项，使用现有配置' 'Invalid option, using existing config')" ;;
         esac
     else
-        print_info "$(_t 'config.json 不存在，先生成模板' 'config.json missing, writing template first')"
-        gen_config_template "$CONFIG_FILE.example"
-        if confirm "$(_t "是否进入交互式生成 $CONFIG_FILE" "Enter interactive generation for $CONFIG_FILE")" y; then
-            gen_config_interactive
-        else
-            print_warn "$(_t "请先 cp $CONFIG_FILE.example $CONFIG_FILE 并按需修改，再重跑安装" \
-                            "Run: cp $CONFIG_FILE.example $CONFIG_FILE  then edit and re-run install")"
+        print_info "$(_t 'config.json 不存在，进入配置生成流程' 'config.json missing, entering config generation')"
+        cmd_gen_config
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            print_warn "$(_t '未生成 config.json — 请重跑 install 或手动写入' 'config.json not generated — re-run install or write manually')"
             return 0
         fi
     fi
@@ -1470,10 +1555,161 @@ cmd_gen_config() {
         return 0
     fi
     [[ -f "$CONFIG_FILE" ]] && backup_now >/dev/null
-    gen_config_template "$CONFIG_FILE"
-    if confirm "$(_t '进入交互生成多节点配置' 'Enter multi-node interactive generation')" y; then
-        gen_config_interactive
+
+    print_info "$(_t '请选择安装模式:' 'Choose install mode:')"
+    print_choice "1)" "$(_t '智能模式 — 由面板提供节点列表 (推荐, 需要面板支持 /v2/server/{ID})' 'Smart — panel provides protocol list (recommended, requires /v2/server/{ID})')"
+    print_choice "2)" "$(_t '手动模式 — 逐个输入 NodeID + NodeType' 'Manual — enter NodeID + NodeType for each node')"
+    local mode
+    mode=$(prompt_read "$(_t '请选择' 'Select')" "1")
+    case "$mode" in
+        2)
+            gen_config_template "$CONFIG_FILE"
+            if confirm "$(_t '进入交互生成多节点配置' 'Enter multi-node interactive generation')" y; then
+                gen_config_interactive
+            fi
+            ;;
+        *)
+            local rc
+            gen_config_smart_mode
+            rc=$?
+            case "$rc" in
+                0) return 0 ;;
+                2)
+                    print_info "$(_t '回退到手动模式' 'Falling back to manual mode')"
+                    gen_config_template "$CONFIG_FILE"
+                    if confirm "$(_t '进入交互生成多节点配置' 'Enter multi-node interactive generation')" y; then
+                        gen_config_interactive
+                    fi
+                    ;;
+                *) return 1 ;;
+            esac
+            ;;
+    esac
+}
+
+# gen_config_smart_mode: probe the panel's /v2/server/{ServerId} endpoint
+# and write a StartNodes-style config (top-level Api block + empty Nodes
+# array). yunzes-node's cmd/server.go branches on this exact shape:
+# `len(c.NodeConfig) == 0` plus a populated ApiConfig sends startup down
+# the panel-driven path that fetches all protocols at once.
+#
+# Returns:
+#   0 — smart-mode config written, caller is done
+#   1 — fatal (user cancelled or unrecoverable error)
+#   2 — panel does not support /v2 (404); caller should fall back to
+#       gen_config_interactive (manual mode)
+gen_config_smart_mode() {
+    local api_host secret_key server_id
+    api_host=$(prompt_required "$(_t '面板 ApiHost (例: https://api.example.com)' 'Panel ApiHost (e.g. https://api.example.com)')" \
+                                "ApiHost 不能为空" "ApiHost is required")
+    secret_key=$(prompt_required "$(_t '面板 SecretKey' 'Panel SecretKey')" \
+                                "SecretKey 不能为空，否则 /v2/server 调用全部 401" "SecretKey is required, otherwise all /v2/server calls return 401")
+    server_id=$(prompt_required "$(_t 'ServerID (整数, 一个 ServerID 可包含多协议)' 'ServerID (integer, one ServerID can host multiple protocols)')" \
+                                "ServerID 不能为空" "ServerID is required")
+    if ! [[ "$server_id" =~ ^[0-9]+$ ]]; then
+        print_fail "$(_t "ServerID 必须是整数: $server_id" "ServerID must be an integer: $server_id")"
+        return 1
     fi
+
+    print_step "$(_t "探测面板 /v2/server/$server_id 接口" "Probing panel /v2/server/$server_id")"
+    local probe_url="${api_host%/}/v2/server/${server_id}?secret_key=${secret_key}"
+    local probe_log_safe="${api_host%/}/v2/server/${server_id}?secret_key=***"
+    print_cmd "curl -s --connect-timeout 5 $probe_log_safe"
+
+    local body_file http_code
+    body_file=$(mktemp)
+    http_code=$(curl -s -o "$body_file" -w '%{http_code}' --connect-timeout 5 "$probe_url" || echo 000)
+
+    case "$http_code" in
+        200) ;;
+        404)
+            print_warn "$(_t "面板不支持 /v2/server/$server_id 接口（HTTP 404）— 将切换到手动模式" "Panel does not implement /v2/server/$server_id (HTTP 404) — falling back to manual mode")"
+            rm -f "$body_file"
+            return 2
+            ;;
+        401|403)
+            print_fail "$(_t "面板拒绝（HTTP $http_code）— SecretKey 错或权限不足" "Panel rejected (HTTP $http_code) — wrong SecretKey or insufficient privilege")"
+            rm -f "$body_file"
+            return 1
+            ;;
+        000|"")
+            print_fail "$(_t "无法连接面板 $api_host" "Cannot connect to panel $api_host")"
+            rm -f "$body_file"
+            return 1
+            ;;
+        5*)
+            print_fail "$(_t "面板内部错误 HTTP $http_code" "Panel internal error HTTP $http_code")"
+            rm -f "$body_file"
+            return 1
+            ;;
+        *)
+            print_warn "$(_t "面板返回非预期状态 HTTP $http_code，将尝试解析" "Panel returned unexpected status HTTP $http_code, trying to parse anyway")"
+            ;;
+    esac
+
+    # Parse: panel returns {"code":..., "msg":..., "data":{"basic":..., "protocols":[...]}}
+    if ! jq empty "$body_file" 2>/dev/null; then
+        print_fail "$(_t "面板返回非合法 JSON" "Panel returned invalid JSON")"
+        print_info "$(_t '以下为面板返回的原始响应:' 'Raw panel response below:')"
+        head -c 400 "$body_file"; echo
+        rm -f "$body_file"
+        return 1
+    fi
+    local protocols_count
+    protocols_count=$(jq '.data.protocols | length // 0' "$body_file" 2>/dev/null)
+    if (( protocols_count == 0 )); then
+        print_fail "$(_t "面板上的 ServerID=$server_id 没有配置任何协议" "ServerID=$server_id on the panel has zero protocols configured")"
+        print_fix "$(_t "请在面板后台为该 ServerID 添加至少一个协议节点，再重跑" "Add at least one protocol to this ServerID on the panel, then retry")"
+        rm -f "$body_file"
+        return 1
+    fi
+
+    print_ok "$(_t "面板返回 $protocols_count 个协议:" "Panel returned $protocols_count protocols:")"
+    local row n=0
+    while IFS= read -r row; do
+        n=$((n+1))
+        local ptype pport psec
+        ptype=$(echo "$row" | jq -r '.type // "?"')
+        pport=$(echo "$row" | jq -r '.port // "?"')
+        psec=$( echo "$row" | jq -r '.security // ""')
+        if [[ -n "$psec" && "$psec" != "null" ]]; then
+            print_choice "$n)" "$ptype  port=$pport  security=$psec"
+        else
+            print_choice "$n)" "$ptype  port=$pport"
+        fi
+    done < <(jq -c '.data.protocols[]' "$body_file")
+    rm -f "$body_file"
+
+    if ! confirm "$(_t "确认使用以上 $protocols_count 个协议（写为智能模式 config，由面板统一下发）" \
+                       "Confirm using the $protocols_count protocols above (smart-mode config, panel-driven)")" y; then
+        return 1
+    fi
+
+    local final
+    final=$(jq -n \
+        --arg ah "$api_host" --arg sk "$secret_key" --argjson sid "$server_id" \
+        '{
+            Log:   {Level: "info"},
+            Cores: [{Type:"xray"}, {Type:"sing"}],
+            Api: {
+                ApiHost:   $ah,
+                ServerID:  $sid,
+                SecretKey: $sk,
+                Timeout:   30
+            },
+            Nodes: []
+        }')
+    if ! echo "$final" | jq empty 2>/dev/null; then
+        print_fail "$(_t "生成的 JSON 不合法（脚本 bug，请反馈）" "Generated JSON invalid (script bug)")"
+        return 1
+    fi
+    echo "$final" > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    print_ok "$(_t "已写入 $CONFIG_FILE （智能模式：$protocols_count 个协议由面板下发）" \
+                  "Wrote $CONFIG_FILE (smart mode: $protocols_count protocols served by panel)")"
+    print_info "$(_t '运行时面板会决定每个协议的端口、cipher、security 等具体参数；本地不再需要手动维护 NodeID/NodeType 列表' \
+                    'At runtime the panel decides per-protocol port/cipher/security; the local config no longer needs manual NodeID/NodeType lists')"
+    return 0
 }
 
 # gen_config_interactive: now enforces non-empty CertDomain when CertMode
@@ -1491,7 +1727,7 @@ gen_config_interactive() {
         local cert_mode cert_domain cert_file key_file email
         api_host=$(prompt_read "ApiHost"      "https://your-panel.example.com")
         api_key=$(prompt_required "ApiKey" \
-            "ApiKey 不能为空，否则 panel 调用全部 401" \
+            "ApiKey 不能为空，否则面板调用全部 401" \
             "ApiKey is required, otherwise all panel calls return 401")
         node_id=$(prompt_read  "NodeID" "1")
         print_info "$(_t '支持协议: vless / vmess / trojan / shadowsocks / hysteria2 / tuic / anytls' \
@@ -1729,7 +1965,7 @@ PYEOF
 
 start_fake_panel() {
     if [[ -f "$FAKE_PANEL_PID_FILE" ]] && kill -0 "$(<"$FAKE_PANEL_PID_FILE")" 2>/dev/null; then
-        print_info "$(_t "fake panel 已在运行 (PID $(<"$FAKE_PANEL_PID_FILE"))" "fake panel already running (PID $(<"$FAKE_PANEL_PID_FILE"))")"
+        print_info "$(_t "模拟面板已在运行 (PID $(<"$FAKE_PANEL_PID_FILE"))" "fake panel already running (PID $(<"$FAKE_PANEL_PID_FILE"))")"
         return 0
     fi
     write_fake_panel_py
@@ -1738,9 +1974,9 @@ start_fake_panel() {
     echo $! > "$FAKE_PANEL_PID_FILE"
     sleep 1
     if curl -s --max-time 2 "http://127.0.0.1:${FAKE_PANEL_PORT}/v1/server/user" >/dev/null; then
-        print_ok "$(_t "fake panel 启动成功 (PID $(<"$FAKE_PANEL_PID_FILE"))" "fake panel started (PID $(<"$FAKE_PANEL_PID_FILE"))")"
+        print_ok "$(_t "模拟面板启动成功 (PID $(<"$FAKE_PANEL_PID_FILE"))" "fake panel started (PID $(<"$FAKE_PANEL_PID_FILE"))")"
     else
-        print_fail "$(_t "fake panel 启动失败 — 查看 $FAKE_PANEL_LOG_FILE" "fake panel start failed — see $FAKE_PANEL_LOG_FILE")"
+        print_fail "$(_t "模拟面板启动失败 — 查看 $FAKE_PANEL_LOG_FILE" "fake panel start failed — see $FAKE_PANEL_LOG_FILE")"
         return 1
     fi
 }
@@ -1913,12 +2149,12 @@ cmd_fake_test() {
 
     echo
     print_separator
-    printf "$(_t 'fake-test 汇总:' 'fake-test summary:') %bPASS=%d%b  %bFAIL=%d%b\n" \
+    printf "$(_t '模拟面板验证汇总:' 'fake-test summary:') %bPASS=%d%b  %bFAIL=%d%b\n" \
         "${C_GREEN}" "$fake_pass" "${C_PLAIN}" "${C_RED}" "$fake_fail" "${C_PLAIN}"
     print_separator
 
     echo
-    if confirm "$(_t '停止 fake panel' 'Stop fake panel')" y; then
+    if confirm "$(_t '停止模拟面板' 'Stop fake panel')" y; then
         cmd_stop_fake_panel
     fi
     if confirm "$(_t "删除测试容器 ($NAME)" "Delete test container ($NAME)")" n; then
@@ -1945,7 +2181,7 @@ cmd_fake_test() {
             fi
         fi
     else
-        print_info "$(_t 'fake-test 启动前没有 config.json, 无需恢复' 'No prior config.json, nothing to restore')"
+        print_info "$(_t '验证启动前没有 config.json, 无需恢复' 'No prior config.json, nothing to restore')"
     fi
     return $fake_fail
 }
@@ -1956,7 +2192,7 @@ cmd_stop_fake_panel() {
         pid=$(<"$FAKE_PANEL_PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             print_cmd "kill $pid"
-            kill "$pid" 2>/dev/null && print_ok "$(_t "fake panel 已停止 (PID $pid)" "fake panel stopped (PID $pid)")"
+            kill "$pid" 2>/dev/null && print_ok "$(_t "模拟面板已停止 (PID $pid)" "fake panel stopped (PID $pid)")"
         fi
         rm -f "$FAKE_PANEL_PID_FILE"
     fi
