@@ -1,26 +1,74 @@
 #!/usr/bin/env bash
-# yunzes-node management script.
+# ============================================================================
+# yunzes-node — single-file modular management script.
+# ============================================================================
 #
 # Production entry-point: install once via this script and the global
 # `yunzes-node` command becomes the operator's daily driver. Bare invocation
 # launches the interactive menu; every menu item also has a non-interactive
-# subcommand (`yunzes-node install`, `yunzes-node verify`, `yunzes-node
-# fake-test`, ...).
+# subcommand (`yunzes-node install`, `yunzes-node verify`, ...).
 #
-# Default deployment is always Docker + host network + single container,
-# never split xray/sing-box into separate containers.
+# Default deployment is always Docker + host network + single container —
+# never split xray/sing-box into separate containers. The Go binary inside
+# the image already links both runtimes (C0-C5 refactor).
 #
-# Internationalization: every operator-visible string flows through `_t
-# "zh-text" "en-text"`. Locale auto-detects from $YUNZES_LANG or $LANG and
-# defaults to zh.
+# ----------------------------------------------------------------------------
+# MODULE MAP (top -> bottom; bash sources the file linearly)
+# ----------------------------------------------------------------------------
+#   M01 core         constants, paths, locale resolution, color palette
+#   M02 output       print_step/info/ok/warn/fail/fix/cmd/danger/title
+#   M03 prompt       confirm, confirm_phrase, prompt_read, prompt_required
+#   M04 detect       OS, arch, source-tree, docker daemon state, container ps
+#   M05 flags        parse_flags (--no-restart) for non-interactive subcommands
+#   M06 banner       ASCII banner + 25-item interactive menu + lang picker
+#   M07 precheck     basic / dependency / docker / file phases + summary
+#   M08 dependency   apt-driven ensure_dependencies + dockerd start
+#   M09 backup       backup_now / list_backups / restore_from_backup
+#   M10 source       fetch_or_use_source (git clone or pull from REPO_URL)
+#   M11 container    _docker_run, ensure_dirs (canonical run-line wrapper)
+#   M12 verify       L1 basic / L2 network (auto-diag) / L3 business
+#   M13 panel-probe  preflight_panel_check (v1 per-node OR v2 smart probe)
+#   M14 validate     validate_config (NodeID dup, CertDomain non-empty, ...)
+#   M15 config-gen   smart-mode (/v2) -> v1-probe fallback -> manual flow
+#   M16 install      cmd_install / cmd_update / cmd_redeploy + auto-rollback
+#   M17 lifecycle    cmd_start / stop / restart / status
+#   M18 logs         cmd_logs / cmd_follow_log
+#   M19 config-mgmt  cmd_edit_config / cmd_show_config / cmd_gen_config
+#   M20 panel-tools  cmd_check_panel / cmd_ports / cmd_containers / cmd_backup /
+#                    cmd_rollback / cmd_cleanup_images
+#   M21 fake-panel   cmd_fake_test (4-protocol probe) + cmd_stop_fake_panel
+#   M22 cleanup      cmd_uninstall / cmd_uninstall_full / cmd_setup_entry
+#   M23 lang         cmd_lang (persistent zh/en switch)
+#   M24 dispatch     usage / main (top-level argument parser)
 #
-# Color output: all output flows through print_* helpers; colors auto-
-# disable on non-TTY stdout or when NO_COLOR=1 is set.
+# ----------------------------------------------------------------------------
+# Cross-module conventions
+# ----------------------------------------------------------------------------
+#   - Locale: every operator-visible string flows through _t "zh" "en".
+#     Default zh; switch via `yunzes-node lang en` or YUNZES_LANG=en. The
+#     script does NOT consult $LANG (most VPS images carry en_US.UTF-8 by
+#     default, which is not a preference signal).
+#   - Color: all output goes through print_* helpers (M02). Colors auto-
+#     disable on non-TTY stdout or NO_COLOR=1.
+#   - Errors: [FAIL] for hard errors, [WARN] for advisories, [FIX ] for
+#     one-line remediation hints, [CMD ] before exec.
+#   - Subcommands: every cmd_X is reachable both from the menu (M06) and
+#     as `yunzes-node X` via the M24 dispatcher.
+#   - State files: /opt/yunzes-node/state/ chmod 700.
+#
+# Required system commands (M08 ensure_dependencies installs missing on
+# Debian/Ubuntu): docker, curl, jq, tar, git, ss (iproute2), python3 (only
+# for fake-test).
+# ============================================================================
 
 set -uo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_VERSION="1.3.2"
+# ============================================================================
+# M01 core: constants, paths, locale, color palette
+# ============================================================================
+
+readonly SCRIPT_VERSION="2.0.0"
 readonly NAME="yunzes-node"
 readonly DEFAULT_IMAGE="yunzes-node:latest"
 readonly REPO_URL="https://github.com/husibo16/yunzes-node.git"
@@ -113,9 +161,9 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURC
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 SOURCE_DIR=""
 
-# -----------------------------------------------------------------------------
-# OUTPUT HELPERS — every operator-facing line flows through one of these.
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M02 output: print_* helpers — every operator-facing line flows through one.
+# ============================================================================
 print_step()    { printf "%b[STEP]%b %s\n" "${C_CYAN}"    "${C_PLAIN}" "$*"; }
 print_info()    { printf "%b[INFO]%b %s\n" "${C_BLUE}"    "${C_PLAIN}" "$*"; }
 print_success() { printf "%b[ OK ]%b %s\n" "${C_GREEN}"   "${C_PLAIN}" "$*"; }
@@ -155,9 +203,9 @@ fix_hint(){ print_fix     "$@"; }
 
 err_exit() { fail "$*"; exit 1; }
 
-# -----------------------------------------------------------------------------
-# Interactive helpers — colored prompts, all bilingual.
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M03 prompt: interactive helpers — colored bilingual prompts with cancel.
+# ============================================================================
 prompt_read() {
     # prompt_read "question" "default" → echos answer to stdout
     local q="$1" def="${2:-}" reply
@@ -217,9 +265,9 @@ mask_api_key() {
     if (( n <= 8 )); then printf '****'; else printf '%s********%s' "${k:0:4}" "${k: -4}"; fi
 }
 
-# -----------------------------------------------------------------------------
-# Detection helpers
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M04 detect: OS, arch, source-tree, docker daemon state, container ps.
+# ============================================================================
 is_root() { [[ $EUID -eq 0 ]]; }
 
 # detect_os: grep+cut /etc/os-release. Sourcing was unsafe because some
@@ -274,6 +322,9 @@ container_running() { docker ps    --format '{{.Names}}' 2>/dev/null | grep -Fxq
 current_image_id()  { docker inspect --format '{{.Image}}'        "$NAME" 2>/dev/null || true; }
 current_image_name(){ docker inspect --format '{{.Config.Image}}' "$NAME" 2>/dev/null || true; }
 
+# ============================================================================
+# M05 flags: parse_flags strips shared --no-restart from "$@".
+# ============================================================================
 FLAGS_REST=()
 parse_flags() {
     NO_RESTART=0
@@ -288,9 +339,9 @@ parse_flags() {
     done
 }
 
-# -----------------------------------------------------------------------------
-# Banner & menu
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M06 banner: ASCII banner, 25-item menu, first-run language picker.
+# ============================================================================
 print_banner() {
     printf "%b" "${C_BOLD_CYAN}"
     cat <<'BANNER'
@@ -428,9 +479,10 @@ cmd_menu() {
     done
 }
 
-# -----------------------------------------------------------------------------
-# PreCheck phases
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M07 precheck: 4-stage pipeline (basic / dependency / docker / file)
+# Each phase tallies into PRECHECK_PASS/WARN/FAIL via _pcok / _pcwarn / _pcfail.
+# ============================================================================
 _pcok()   { print_success "$1"; PRECHECK_PASS=$((PRECHECK_PASS+1)); }
 _pcwarn() { print_warn    "$1"; PRECHECK_WARN=$((PRECHECK_WARN+1)); }
 _pcfail() { print_error   "$1"; PRECHECK_FAIL=$((PRECHECK_FAIL+1)); }
@@ -480,6 +532,11 @@ dependency_precheck() {
     done
 }
 
+# ============================================================================
+# M08 dependency: ensure_dependencies — apt-driven install + dockerd start.
+# Debian/Ubuntu only; other distros warn-and-skip and let docker_precheck
+# do the hard fail.
+# ============================================================================
 ensure_dependencies() {
     local os
     os=$(detect_os)
@@ -654,9 +711,10 @@ _check_port_free() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-# Config helpers
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M14 validate / M13 panel-probe: config helpers — parse listen specs from
+# config.json, validate per-node fields, probe panel API reachability.
+# ============================================================================
 list_config_listen_specs() {
     [[ -f "$CONFIG_FILE" ]] || return 0
     jq empty "$CONFIG_FILE" 2>/dev/null || return 1
@@ -866,9 +924,10 @@ preflight_panel_check() {
     return 0
 }
 
-# -----------------------------------------------------------------------------
-# Backup / Restore
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M09 backup: snapshot config.json + certs/ + docker inspect into
+# /opt/yunzes-node/backups/<ts>/. List + restore primitives below.
+# ============================================================================
 backup_now() {
     mkdir -p "$BACKUP_DIR"
     local ts dir
@@ -923,9 +982,9 @@ restore_from_backup() {
     return 0
 }
 
-# -----------------------------------------------------------------------------
-# Source-tree management
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M10 source: clone or update REPO_URL into SRC_DIR for local docker build.
+# ============================================================================
 fetch_or_use_source() {
     if [[ -d "$SRC_DIR/.git" ]]; then
         print_info "$(_t "已存在源码：$SRC_DIR" "Existing source: $SRC_DIR")" >&2
@@ -964,9 +1023,9 @@ fetch_or_use_source() {
     echo "$SRC_DIR"
 }
 
-# -----------------------------------------------------------------------------
-# Container ops
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M11 container: canonical docker run wrapper + ensure_dirs.
+# ============================================================================
 _docker_run() {
     local image="$1" restart="${2:-always}"; shift 2 || true
     print_cmd "docker run -d --name $NAME --network host --restart $restart -v $CONFIG_DIR:/etc/yunzes-node $* $image"
@@ -985,9 +1044,13 @@ ensure_dirs() {
     chmod 750 "$CERTS_DIR"  2>/dev/null || true
 }
 
-# -----------------------------------------------------------------------------
-# Verify L1 / L2 / L3
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M12 verify: 3-tier reporter.
+#   L1 verify_basic       container running + config valid + no panic
+#   L2 verify_network     host network, real port-listen check (auto-diag on
+#                         miss: who-owns-port + matching xray/sing warns)
+#   L3 verify_business    panel reachability + structured-log marker presence
+# ============================================================================
 verify_basic() {
     local pass=0 myfail=0
     print_step "$(_t '验证 L1: 基础' 'Verify L1: basics')"
@@ -1105,6 +1168,38 @@ verify_network() {
                 print_ok "$(_t "$p $port/$t 实际监听 ✓" "$p $port/$t actively listening ✓")"; pass=$((pass+1))
             else
                 print_fail "$(_t "$p $port/$t 期待监听但未发现" "$p $port/$t expected listen NOT FOUND")"; myfail=$((myfail+1))
+                # Auto-diagnostic: explain WHY the bind likely failed.
+                # 1. Is the port held by another process on the host?
+                local owner_line
+                case "$t" in
+                    tcp) owner_line=$(ss -lntp 2>/dev/null | awk -v pat=":$port" '$4 ~ pat"$"' | head -1 || true) ;;
+                    udp) owner_line=$(ss -lnup 2>/dev/null | awk -v pat=":$port" '$4 ~ pat"$"' | head -1 || true) ;;
+                esac
+                if [[ -n "$owner_line" ]]; then
+                    local owner_proc
+                    owner_proc=$(echo "$owner_line" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+                    if [[ -n "$owner_proc" && "$owner_proc" != "$NAME" ]]; then
+                        print_fix "$(_t "  $port/$t 被 $owner_proc 占用 — 改另一个端口或停掉 $owner_proc" "  $port/$t held by $owner_proc — pick another port or stop $owner_proc")"
+                    fi
+                fi
+                # 2. xray / sing 内部 bind 错误（warn 级别，不会进 L1 panic 检测）
+                local xray_warn
+                xray_warn=$(docker logs --tail 500 "$NAME" 2>&1 \
+                    | grep -E "(\[Warning\]|\[Error\]|level=(warn|warning|error)).*($port|$p)" \
+                    | tail -3 || true)
+                if [[ -n "$xray_warn" ]]; then
+                    print_info "$(_t "  以下为 docker logs 中与 $p/$port/$t 相关的 warn/error:" "  Related warn/error from docker logs for $p/$port/$t:")"
+                    echo "$xray_warn" | sed 's/^/      /'
+                fi
+                # 3. 配置 hint：reality 缺字段是常见 silent fail
+                if [[ "$p" == "vless" ]]; then
+                    local reality_lines
+                    reality_lines=$(docker logs --tail 300 "$NAME" 2>&1 | grep -i "reality" | tail -3 || true)
+                    if [[ -n "$reality_lines" ]]; then
+                        print_info "$(_t "  reality 相关日志:" "  reality-related lines:")"
+                        echo "$reality_lines" | sed 's/^/      /'
+                    fi
+                fi
             fi
         done <<<"$rows"
         local ss_tcp ss_udp
@@ -1187,9 +1282,12 @@ cmd_verify() {
     return 1
 }
 
-# -----------------------------------------------------------------------------
-# Install / Lifecycle
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M16/M17/M18/M19 lifecycle: install/update/redeploy + start/stop/restart/
+# status + logs + edit/show/gen-config. cmd_install ties everything together
+# (precheck -> deps -> docker_precheck -> dirs -> config -> validate -> panel
+# preflight -> docker run -> verify).
+# ============================================================================
 cmd_install() {
     parse_flags "$@"
     reset_precheck_counters
@@ -1602,6 +1700,13 @@ cmd_gen_config() {
     esac
 }
 
+# ============================================================================
+# M15 config-gen: 3-tier config generation
+#   1. gen_config_smart_mode      probe /v2/server/{id}; write panel-driven config
+#   2. gen_config_probe_v1_mode   if /v2 missing, probe /v1/server/config per
+#                                 (NodeID, protocol) and only keep 200s
+#   3. gen_config_interactive     manual NodeID+NodeType entry (last resort)
+# ============================================================================
 # gen_config_smart_mode: probe the panel's /v2/server/{ServerId} endpoint
 # and write a StartNodes-style config (top-level Api block + empty Nodes
 # array). yunzes-node's cmd/server.go branches on this exact shape:
@@ -2035,9 +2140,17 @@ cmd_cleanup_images() {
     docker images --filter "reference=yunzes-node" --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
 }
 
-# -----------------------------------------------------------------------------
-# Fake panel 4-protocol test
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M20 panel-tools: cmd_check_panel / cmd_ports / cmd_containers / cmd_backup /
+#                  cmd_rollback / cmd_cleanup_images.
+# (cmd_check_panel reuses M13 preflight_panel_check.)
+# ============================================================================
+# (definitions follow M21 below; placement preserved for git-blame stability.)
+
+# ============================================================================
+# M21 fake-panel: bundled Python /v1+/v2 fake panel + cmd_fake_test
+# orchestration (4-protocol bring-up + verify + cert-reuse + cleanup).
+# ============================================================================
 write_fake_panel_py() {
     cat > "$FAKE_PANEL_FILE" <<'PYEOF'
 #!/usr/bin/env python3
@@ -2331,9 +2444,11 @@ cmd_stop_fake_panel() {
     pkill -f fake_panel.py 2>/dev/null || true
 }
 
-# -----------------------------------------------------------------------------
-# Uninstall
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M22 cleanup: cmd_uninstall (preserve data) / cmd_uninstall_full (wipe with
+# DELETE-YUNZES-NODE phrase guard) / cmd_setup_entry (install 0755 to
+# /usr/bin/yunzes-node).
+# ============================================================================
 cmd_uninstall() {
     print_danger "$(_t '卸载操作: 将删除容器并可选删除镜像 / 全局命令' 'Uninstall: deletes container, optionally image / global cmd')"
     print_warn   "$(_t "保留: $CONFIG_DIR (含证书) 与 $BACKUP_DIR (备份)" "Preserved: $CONFIG_DIR (incl. certs) and $BACKUP_DIR (backups)")"
@@ -2389,6 +2504,10 @@ cmd_uninstall_full() {
     print_ok "$(_t '彻底卸载完成' 'Full uninstall complete')"
 }
 
+# ============================================================================
+# M23 lang: cmd_lang — show or persist the operator language preference.
+# (first-run picker lives in M06; lang here is the CLI surface for it.)
+# ============================================================================
 cmd_lang() {
     # Persist locale to LOCALE_STATE_FILE. Resets are also supported.
     local target="${1:-}"
@@ -2454,9 +2573,12 @@ cmd_setup_entry() {
     print_info "$(_t '现在直接 yunzes-node 即可进入菜单' 'Now `yunzes-node` enters the menu')"
 }
 
-# -----------------------------------------------------------------------------
-# Top-level dispatcher
-# -----------------------------------------------------------------------------
+# ============================================================================
+# M24 dispatch: usage + main argument parser. Subcommands that mutate state
+# enforce root via the case below; read-only subcommands (status/logs/verify/
+# show-config/lang) are root-optional so non-root operators in the docker
+# group can still use them.
+# ============================================================================
 usage() {
     print_title "yunzes-node v${SCRIPT_VERSION}  —  $(_t '单容器双核心 Docker 部署' 'Single-container dual-core Docker deployment')"
     print_separator
