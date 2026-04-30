@@ -38,7 +38,15 @@ type Controller struct {
 	// traffic feeds the dynamic speed limit. Always go through its
 	// methods — reportUserTrafficTask, SpeedChecker, and nodeInfoMonitor
 	// all touch it from different goroutines.
-	traffic                   *trafficStore
+	traffic *trafficStore
+	// reportFailures counts consecutive ReportUserTraffic failures.
+	// Bounded rollback (see LimitConfig.MaxReportFailureRollbacks) drops
+	// traffic on the floor once this crosses the threshold so the in-
+	// core per-user counter stays bounded while the panel is unreachable.
+	// Reset on a successful report. Only touched from the userReport
+	// periodic, which is single-threaded.
+	reportFailures int
+
 	userList                  []panel.UserInfo
 	aliveMap                  map[int]int
 	info                      *panel.NodeInfo
@@ -182,6 +190,12 @@ func (c *Controller) Start() (err error) {
 			c.portRegistry.release(c.runtimeKey)
 		}
 	}()
+
+	// Surface deprecated config fields once at startup so operators
+	// see the warn alongside the rest of the controller bring-up logs.
+	// This lives outside the rollback-guarded block since it has no
+	// side effects.
+	warnDeprecatedLimitFields(log.WithFields(c.logFields()), &c.LimitConfig)
 
 	node, err := c.apiClient.GetNodeInfo()
 	if err != nil {

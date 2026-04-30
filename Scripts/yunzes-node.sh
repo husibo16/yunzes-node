@@ -1269,12 +1269,202 @@ verify_business() {
     return $myfail
 }
 
+# verify_certs_and_api is L4 — covers the gaps L1-L3 don't:
+#
+#   - L1 only checks that certs/ exists; it does NOT parse certs or
+#     check expiry. Operators have shipped expired certs into restart
+#     loops more than once because L1 was green.
+#
+#   - L3 only probes the ApiHost root URL; it does NOT exercise the
+#     real /v1/server/config or /v2/server/<id> endpoints with the
+#     actual secret_key, so a misconfigured key, wrong NodeID, or
+#     panel build that doesn't implement the v2 path passes L3.
+#
+# This level walks each Node[]/Server entry, parses the on-disk cert
+# (via openssl) when CertMode is non-"none", and probes the matching
+# API path with the operator's real credentials.
+verify_certs_and_api() {
+    local pass=0 myfail=0 mywarn=0
+    print_step "$(_t '验证 L4: 证书 + API 深度' 'Verify L4: certs + API depth')"
+
+    if [[ ! -f "$CONFIG_FILE" ]] || ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        print_warn "$(_t '无可用 config.json，跳过 L4' 'No config.json, skipping L4')"
+        printf "L4: %bPASS=%d%b  %bWARN=%d%b  %bFAIL=%d%b\n" \
+            "${C_GREEN}" "$pass" "${C_PLAIN}" "${C_YELLOW}" "$mywarn" "${C_PLAIN}" "${C_RED}" "$myfail" "${C_PLAIN}"
+        return 0
+    fi
+    if ! command -v openssl >/dev/null 2>&1; then
+        print_warn "$(_t '未安装 openssl，证书检查跳过' 'openssl not installed, cert checks skipped')"
+        mywarn=$((mywarn+1))
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        print_warn "$(_t '未安装 curl，API 深度检查跳过' 'curl not installed, API depth checks skipped')"
+        mywarn=$((mywarn+1))
+    fi
+
+    # ---- per-node cert + API probes (legacy Nodes[] shape) ----
+    local nodes_count
+    nodes_count=$(jq '.Nodes | length // 0' "$CONFIG_FILE")
+    if (( nodes_count > 0 )); then
+        local i=0
+        while (( i < nodes_count )); do
+            local cm cf domain api_host api_key node_id node_type
+            cm=$(jq -r       ".Nodes[$i].CertConfig.CertMode // .Nodes[$i].Options.CertConfig.CertMode // \"none\"" "$CONFIG_FILE")
+            cf=$(jq -r       ".Nodes[$i].CertConfig.CertFile // .Nodes[$i].Options.CertConfig.CertFile // \"\"" "$CONFIG_FILE")
+            domain=$(jq -r   ".Nodes[$i].CertConfig.CertDomain // .Nodes[$i].Options.CertConfig.CertDomain // \"\"" "$CONFIG_FILE")
+            api_host=$(jq -r ".Nodes[$i].ApiHost // \"\"" "$CONFIG_FILE")
+            api_key=$(jq -r  ".Nodes[$i].ApiKey  // \"\"" "$CONFIG_FILE")
+            node_id=$(jq -r  ".Nodes[$i].NodeID  // \"\"" "$CONFIG_FILE")
+            node_type=$(jq -r ".Nodes[$i].NodeType // \"\"" "$CONFIG_FILE")
+
+            # Cert check
+            case "$cm" in
+                file|http|dns|self)
+                    if command -v openssl >/dev/null 2>&1; then
+                        if [[ -z "$cf" ]]; then
+                            print_warn "$(_t "节点 #$i ($node_type, CertMode=$cm): CertFile 未配置，跳过证书解析" \
+                                            "Node #$i ($node_type, CertMode=$cm): CertFile not set, skipping cert parse")"
+                            mywarn=$((mywarn+1))
+                        elif [[ ! -f "$cf" ]]; then
+                            # http/dns modes may not have issued the cert yet on first start
+                            if [[ "$cm" == "http" || "$cm" == "dns" ]]; then
+                                print_warn "$(_t "节点 #$i: 证书文件 $cf 不存在（ACME $cm 首次签发可能未完成）" \
+                                                "Node #$i: cert file $cf missing (first ACME $cm issue may be pending)")"
+                                mywarn=$((mywarn+1))
+                            else
+                                print_fail "$(_t "节点 #$i ($cm 模式): 证书文件 $cf 不存在" \
+                                                "Node #$i ($cm mode): cert file $cf missing")"
+                                myfail=$((myfail+1))
+                            fi
+                        else
+                            local notafter days_left
+                            notafter=$(openssl x509 -in "$cf" -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+                            if [[ -z "$notafter" ]]; then
+                                print_fail "$(_t "节点 #$i: 证书 $cf 解析失败（非 PEM 或损坏）" \
+                                                "Node #$i: cert $cf unparseable (not PEM or corrupt)")"
+                                myfail=$((myfail+1))
+                            elif openssl x509 -in "$cf" -noout -checkend 0 >/dev/null 2>&1; then
+                                # not expired now; check 30-day window
+                                local expire_ts now_ts
+                                expire_ts=$(date -d "$notafter" +%s 2>/dev/null || echo 0)
+                                now_ts=$(date +%s)
+                                if (( expire_ts > 0 )); then
+                                    days_left=$(( (expire_ts - now_ts) / 86400 ))
+                                    if (( days_left < 7 )); then
+                                        print_fail "$(_t "节点 #$i: 证书 $cf 仅剩 $days_left 天到期 ($notafter)" \
+                                                        "Node #$i: cert $cf expires in $days_left days ($notafter)")"
+                                        myfail=$((myfail+1))
+                                    elif (( days_left < 30 )); then
+                                        print_warn "$(_t "节点 #$i: 证书 $cf 剩 $days_left 天到期 ($notafter)" \
+                                                        "Node #$i: cert $cf expires in $days_left days ($notafter)")"
+                                        mywarn=$((mywarn+1))
+                                    else
+                                        print_ok "$(_t "节点 #$i: 证书 $cf 剩 $days_left 天 ($domain)" \
+                                                        "Node #$i: cert $cf $days_left days remaining ($domain)")"
+                                        pass=$((pass+1))
+                                    fi
+                                fi
+                            else
+                                print_fail "$(_t "节点 #$i: 证书 $cf 已过期 ($notafter)" \
+                                                "Node #$i: cert $cf EXPIRED ($notafter)")"
+                                myfail=$((myfail+1))
+                            fi
+                        fi
+                    fi
+                    ;;
+                none|"")
+                    : # no cert expected
+                    ;;
+                *)
+                    print_warn "$(_t "节点 #$i: 未知 CertMode '$cm'，跳过证书检查" \
+                                    "Node #$i: unknown CertMode '$cm', skipping cert check")"
+                    mywarn=$((mywarn+1))
+                    ;;
+            esac
+
+            # API depth probe (/v1/server/config) — exercises secret_key auth.
+            if command -v curl >/dev/null 2>&1 && [[ -n "$api_host" && -n "$api_key" && -n "$node_id" ]]; then
+                local url body status
+                url="${api_host%/}/v1/server/config?protocol=${node_type}&server_id=${node_id}&secret_key=${api_key}"
+                status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 "$url" || echo 000)
+                case "$status" in
+                    200|304)
+                        print_ok "$(_t "节点 #$i API: /v1/server/config 鉴权通过 (HTTP $status)" \
+                                        "Node #$i API: /v1/server/config auth OK (HTTP $status)")"
+                        pass=$((pass+1)) ;;
+                    401|403)
+                        print_fail "$(_t "节点 #$i API: secret_key 鉴权失败 (HTTP $status) — 检查 ApiKey" \
+                                        "Node #$i API: secret_key auth failed (HTTP $status) — check ApiKey")"
+                        myfail=$((myfail+1)) ;;
+                    404)
+                        print_fail "$(_t "节点 #$i API: NodeID=$node_id / NodeType=$node_type 在面板上不存在 (HTTP 404)" \
+                                        "Node #$i API: NodeID=$node_id / NodeType=$node_type not found on panel (HTTP 404)")"
+                        myfail=$((myfail+1)) ;;
+                    5*)
+                        print_fail "$(_t "节点 #$i API: 面板 5xx ($status)" \
+                                        "Node #$i API: panel 5xx ($status)")"
+                        myfail=$((myfail+1)) ;;
+                    000)
+                        print_fail "$(_t "节点 #$i API: 无法连接 $api_host" \
+                                        "Node #$i API: cannot reach $api_host")"
+                        myfail=$((myfail+1)) ;;
+                    *)
+                        print_warn "$(_t "节点 #$i API: HTTP $status (非典型)" \
+                                        "Node #$i API: HTTP $status (atypical)")"
+                        mywarn=$((mywarn+1)) ;;
+                esac
+            fi
+            i=$((i+1))
+        done
+    fi
+
+    # ---- panel-mode (ServerApiConfig + /v2/server/<id>) probe ----
+    local sapi_host sapi_key sapi_sid
+    sapi_host=$(jq -r '.ServerApiConfig.ApiHost   // empty' "$CONFIG_FILE")
+    sapi_key=$( jq -r '.ServerApiConfig.SecretKey // empty' "$CONFIG_FILE")
+    sapi_sid=$( jq -r '.ServerApiConfig.ServerId  // empty' "$CONFIG_FILE")
+    if command -v curl >/dev/null 2>&1 && [[ -n "$sapi_host" && -n "$sapi_key" && -n "$sapi_sid" ]]; then
+        local url status
+        url="${sapi_host%/}/v2/server/${sapi_sid}?secret_key=${sapi_key}"
+        status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 "$url" || echo 000)
+        case "$status" in
+            200)
+                print_ok "$(_t "面板 v2 API: /v2/server/$sapi_sid 鉴权通过 (HTTP 200)" \
+                                "Panel v2 API: /v2/server/$sapi_sid auth OK (HTTP 200)")"
+                pass=$((pass+1)) ;;
+            401|403)
+                print_fail "$(_t "面板 v2 API: secret_key 鉴权失败 (HTTP $status)" \
+                                "Panel v2 API: secret_key auth failed (HTTP $status)")"
+                myfail=$((myfail+1)) ;;
+            404)
+                print_warn "$(_t "面板 v2 API: 路径或 ServerID 不存在 (HTTP 404) — 节点会回落到 /v1 探测模式" \
+                                "Panel v2 API: path or ServerID missing (HTTP 404) — node falls back to /v1 probe")"
+                mywarn=$((mywarn+1)) ;;
+            5*)
+                print_fail "$(_t "面板 v2 API: 5xx ($status)" \
+                                "Panel v2 API: 5xx ($status)")"
+                myfail=$((myfail+1)) ;;
+            000)
+                print_fail "$(_t "面板 v2 API: 无法连接 $sapi_host" \
+                                "Panel v2 API: cannot reach $sapi_host")"
+                myfail=$((myfail+1)) ;;
+            *)
+                print_info "$(_t "面板 v2 API: HTTP $status" "Panel v2 API: HTTP $status")" ;;
+        esac
+    fi
+
+    printf "L4: %bPASS=%d%b  %bWARN=%d%b  %bFAIL=%d%b\n" \
+        "${C_GREEN}" "$pass" "${C_PLAIN}" "${C_YELLOW}" "$mywarn" "${C_PLAIN}" "${C_RED}" "$myfail" "${C_PLAIN}"
+    return $myfail
+}
+
 cmd_verify() {
-    verify_basic;    local r1=$?; echo
-    verify_network;  local r2=$?; echo
-    verify_business; local r3=$?; echo
+    verify_basic;          local r1=$?; echo
+    verify_network;        local r2=$?; echo
+    verify_business;       local r3=$?; echo
+    verify_certs_and_api;  local r4=$?; echo
     print_separator
-    if (( r1 + r2 + r3 == 0 )); then
+    if (( r1 + r2 + r3 + r4 == 0 )); then
         print_ok "$(_t '全部 verify 等级通过' 'All verify levels passed')"
         return 0
     fi

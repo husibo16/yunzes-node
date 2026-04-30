@@ -13,19 +13,38 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(&userTraffic)
 		if err != nil {
-			// Rollback so the next cycle re-reports.
-			if rbErr := c.server.AddUserTrafficSlice(c.runtimeKey, userTraffic); rbErr != nil {
+			c.reportFailures++
+			if reportRollbackDecision(c.reportFailures, c.LimitConfig.MaxReportFailureRollbacks) {
+				// Bounded-rollback guard: too many consecutive failures.
+				// Drop the bytes on the floor so the in-core per-user
+				// counter doesn't grow without limit. The panel will
+				// undercount this user until reporting recovers.
 				log.WithFields(mergeFields(c.logFields(), log.Fields{
-					"report_err":   err,
-					"rollback_err": rbErr,
+					"err":                  err,
+					"consecutive_failures": c.reportFailures,
+					"dropped_count":        len(userTraffic),
+					"rollback_cap":         reportFailureCap(c.LimitConfig.MaxReportFailureRollbacks),
+				})).Error("Report failed; rollback cap exceeded — traffic dropped to bound in-core accumulator")
+			} else if rbErr := c.server.AddUserTrafficSlice(c.runtimeKey, userTraffic); rbErr != nil {
+				log.WithFields(mergeFields(c.logFields(), log.Fields{
+					"report_err":           err,
+					"rollback_err":         rbErr,
+					"consecutive_failures": c.reportFailures,
 				})).Error("Report failed AND rollback failed — traffic lost")
 			} else {
 				log.WithFields(mergeFields(c.logFields(), log.Fields{
-					"err":               err,
-					"rolled_back_count": len(userTraffic),
+					"err":                  err,
+					"rolled_back_count":    len(userTraffic),
+					"consecutive_failures": c.reportFailures,
 				})).Warn("Report failed, traffic rolled back to core for next cycle")
 			}
 		} else {
+			if c.reportFailures > 0 {
+				log.WithFields(mergeFields(c.logFields(), log.Fields{
+					"recovered_after_failures": c.reportFailures,
+				})).Info("Report recovered after consecutive failures")
+			}
+			c.reportFailures = 0
 			log.WithFields(c.logFields()).Infof("Report %d users traffic", len(userTraffic))
 			if c.LimitConfig.EnableDynamicSpeedLimit {
 				c.feedDynamicTraffic(userTraffic)
