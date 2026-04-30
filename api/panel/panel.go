@@ -110,6 +110,33 @@ type ProtocolConfig struct {
 	UpMbps              int    `json:"up_mbps"`
 	DownMbps            int    `json:"down_mbps"`
 	EnableProxyProtocol bool   `json:"enable_proxy_protocol"`
+	// CertConfig, if non-nil, lets the panel server override the
+	// hardcoded ACME HTTP-01 default that the panel-driven controller
+	// previously baked in for every Security="tls" protocol. Old servers
+	// that don't yet send this field leave the pointer nil and the node
+	// falls back to the legacy behavior (HTTP-01 + p.SNI + the
+	// /etc/yunzes-node/certs/<type><id>.{crt,key} default paths). New
+	// servers can set CertMode to dns/file/self/none and supply
+	// Provider / Email / DNSEnv / RenewBeforeDays / explicit cert paths.
+	// Resolution lives in node.resolveCertConfig.
+	CertConfig *CertProtocolConfig `json:"cert_config,omitempty"`
+}
+
+// CertProtocolConfig is the wire-side cert override the panel server may
+// attach to a ProtocolConfig. Each field is optional; empty values fall
+// back to the legacy defaults that the node used to hardcode (see
+// node.resolveCertConfig). Snake-case JSON tags match the rest of the
+// /v2/server payload; the in-process conf.CertConfig stays PascalCase
+// because it is also written to local config files.
+type CertProtocolConfig struct {
+	CertMode        string            `json:"cert_mode"`
+	CertDomain      string            `json:"cert_domain"`
+	CertFile        string            `json:"cert_file"`
+	KeyFile         string            `json:"key_file"`
+	Provider        string            `json:"provider"`
+	Email           string            `json:"email"`
+	DNSEnv          map[string]string `json:"dns_env"`
+	RenewBeforeDays int               `json:"renew_before_days"`
 }
 
 func GetServerNodeConfigs(apiConfig *conf.ServerApiConfig) ([]ProtocolConfig, *BasicConfig, error) {

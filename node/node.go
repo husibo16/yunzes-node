@@ -263,13 +263,7 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 	// are rejected up front.
 	switch p.Security {
 	case "tls":
-		nodeoptions.CertConfig = &conf.CertConfig{
-			CertMode:         "http",
-			RejectUnknownSni: false,
-			CertDomain:       p.SNI,
-			CertFile:         fmt.Sprintf("/etc/yunzes-node/certs/%s%d.crt", node.Type, node.Id),
-			KeyFile:          fmt.Sprintf("/etc/yunzes-node/certs/%s%d.key", node.Type, node.Id),
-		}
+		nodeoptions.CertConfig = resolveCertConfig(p, node.Type, node.Id)
 	case "reality", "", "none":
 		nodeoptions.CertConfig = &conf.CertConfig{
 			CertMode: "none",
