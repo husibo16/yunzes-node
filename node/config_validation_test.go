@@ -114,3 +114,38 @@ func TestWarnDeprecatedLimitFields_NilSafe(t *testing.T) {
 	}()
 	warnDeprecatedLimitFields(log.WithField("t", t.Name()), nil)
 }
+
+// TestWarnDeprecatedXrayOptions_EnableUotEmits is the C15 EnableUot
+// regression. Operators who set EnableUot=true in config.json must
+// see a deprecation Warn at startup; the field is kept on the struct
+// for back-compat but has no consumer in the data path.
+func TestWarnDeprecatedXrayOptions_EnableUotEmits(t *testing.T) {
+	out := captureLog(t, func(le *log.Entry) {
+		warnDeprecatedXrayOptions(le, &conf.XrayOptions{EnableUot: true})
+	})
+	if !strings.Contains(out, "EnableUot is deprecated") {
+		t.Errorf("expected deprecation Warn for EnableUot, got: %q", out)
+	}
+}
+
+// TestWarnDeprecatedXrayOptions_DefaultIsSilent — a fresh
+// NewXrayOptions() (EnableUot=false) must not produce noise.
+func TestWarnDeprecatedXrayOptions_DefaultIsSilent(t *testing.T) {
+	out := captureLog(t, func(le *log.Entry) {
+		warnDeprecatedXrayOptions(le, conf.NewXrayOptions())
+	})
+	if strings.Contains(out, "deprecated") {
+		t.Errorf("default XrayOptions produced deprecation noise: %q", out)
+	}
+}
+
+// TestWarnDeprecatedXrayOptions_NilSafe mirrors the LimitConfig nil
+// guard. Controllers without XrayOptions (sing-box only) pass nil.
+func TestWarnDeprecatedXrayOptions_NilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil XrayOptions caused panic: %v", r)
+		}
+	}()
+	warnDeprecatedXrayOptions(log.WithField("t", t.Name()), nil)
+}

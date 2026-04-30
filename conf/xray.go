@@ -47,15 +47,21 @@ func NewXrayConfig() *XrayConfig {
 }
 
 type XrayOptions struct {
-	EnableProxyProtocol bool                    `json:"EnableProxyProtocol"`
-	EnableDNS           bool                    `json:"EnableDNS"`
-	DNSType             string                  `json:"DNSType"`
-	EnableUot           bool                    `json:"EnableUot"`
-	EnableTFO           bool                    `json:"EnableTFO"`
-	DisableIVCheck      bool                    `json:"DisableIVCheck"`
-	DisableSniffing     bool                    `json:"DisableSniffing"`
-	EnableFallback      bool                    `json:"EnableFallback"`
-	FallBackConfigs     []FallBackConfigForXray `json:"FallBackConfigs"`
+	EnableProxyProtocol bool   `json:"EnableProxyProtocol"`
+	EnableDNS           bool   `json:"EnableDNS"`
+	DNSType             string `json:"DNSType"`
+	// EnableUot was meant to enable UDP-over-TCP at the inbound level
+	// but never reached a consumer in this fork — no core-side wiring
+	// exists. Operators who set it true got a silent no-op. Kept here
+	// for back-compat (so existing config.json files unmarshal cleanly)
+	// and surfaced via node.warnDeprecatedXrayOptions at controller
+	// startup. Remove from your config when convenient.
+	EnableUot       bool                    `json:"EnableUot"`
+	EnableTFO       bool                    `json:"EnableTFO"`
+	DisableIVCheck  bool                    `json:"DisableIVCheck"`
+	DisableSniffing bool                    `json:"DisableSniffing"`
+	EnableFallback  bool                    `json:"EnableFallback"`
+	FallBackConfigs []FallBackConfigForXray `json:"FallBackConfigs"`
 }
 
 type FallBackConfigForXray struct {

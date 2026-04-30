@@ -42,6 +42,24 @@ func reportRollbackDecision(consecutiveFailures, configuredCap int) (shouldDrop 
 	return consecutiveFailures > cap
 }
 
+// warnDeprecatedXrayOptions emits a Warn for XrayOptions fields that
+// are declared on the struct but never reach a consumer in this fork.
+// Same deprecation pattern as warnDeprecatedLimitFields: keep the
+// field declared so existing config.json files still unmarshal, but
+// signal the operator at startup so they can clean their config.
+//
+// EnableUot was meant to flip UDP-over-TCP at the inbound, but no
+// core-side wiring picks it up. Setting it was a silent no-op before
+// this commit.
+func warnDeprecatedXrayOptions(le *log.Entry, x *conf.XrayOptions) {
+	if x == nil {
+		return
+	}
+	if x.EnableUot {
+		le.Warn("XrayOptions.EnableUot is deprecated and unwired in this build; remove it from config.json")
+	}
+}
+
 // warnDeprecatedLimitFields emits a Warn for each LimitConfig field that
 // is declared in conf/limit.go but never read by the data path. Setting
 // them in config.json was a silent no-op before — now operators get a

@@ -195,7 +195,9 @@ func (c *Controller) Start() (err error) {
 	// see the warn alongside the rest of the controller bring-up logs.
 	// This lives outside the rollback-guarded block since it has no
 	// side effects.
-	warnDeprecatedLimitFields(log.WithFields(c.logFields()), &c.LimitConfig)
+	deprecLog := log.WithFields(c.logFields())
+	warnDeprecatedLimitFields(deprecLog, &c.LimitConfig)
+	warnDeprecatedXrayOptions(deprecLog, c.Options.XrayOptions)
 
 	node, err := c.apiClient.GetNodeInfo()
 	if err != nil {
