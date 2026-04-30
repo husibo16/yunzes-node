@@ -306,9 +306,21 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 // JSON decoders default numeric fields to float64, so the original .(int)
 // assertion on basic.PushInterval would panic. Also tolerates a nil basic
 // (server without the basic field, or pre-fix server build).
+//
+// defaultPull was lowered from 60s to 15s. Background: GetUserList()
+// (api/panel/user.go) sends If-None-Match and treats 304 as a no-op,
+// and the panel server's GetServerUserList handler emits an ETag and
+// short-circuits unchanged responses to a near-empty 304. So a poll
+// that finds nothing new is cheap, and a more frequent cadence
+// shortens "admin disables a user → node stops serving them" latency.
+// Recommended override range: 10-30s. Operators can override this
+// fallback by setting BasicConfig.PullInterval on the panel side
+// (NodePullInterval in ppanel.yaml) — that value wins when non-zero.
+// Keep this constant in sync with NodePullInterval's default in the
+// panel config (currently 15).
 func resolveIntervals(basic *panel.BasicConfig) (push, pull time.Duration) {
 	const defaultPush = 30 * time.Second
-	const defaultPull = 60 * time.Second
+	const defaultPull = 15 * time.Second
 	if basic == nil {
 		return defaultPush, defaultPull
 	}
