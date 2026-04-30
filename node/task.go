@@ -5,10 +5,8 @@ import (
 	"time"
 
 	"github.com/husibo16/yunzes-node/api/panel"
-	"github.com/husibo16/yunzes-node/common/format"
 	"github.com/husibo16/yunzes-node/common/task"
 	vCore "github.com/husibo16/yunzes-node/core"
-	"github.com/husibo16/yunzes-node/limiter"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -97,62 +95,17 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		return nil
 	}
 	if newN != nil {
-		c.info = newN
-		if newU != nil {
-			c.userList = newU
-		}
-		c.traffic.Reset()
-		log.WithFields(c.logFields()).Info("Node changed, reload")
-		oldRuntimeKey := c.runtimeKey
-		oldLogicalTag := c.logicalTag
-		err = c.server.DelNode(oldRuntimeKey)
-		if err != nil {
-			log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Delete node failed")
+		// Configuration changed. Hand off to reloadNodeConfig which
+		// snapshots old state, pre-validates the new one, and on any
+		// downstream failure rolls back to the old NodeInfo + user list
+		// + limiter rather than leaving the node offline until the next
+		// pull cycle.
+		if reloadErr := c.reloadNodeConfig(newN, newU, newA); reloadErr != nil {
+			log.WithFields(mergeFields(c.logFields(), log.Fields{"err": reloadErr})).
+				Error("reload returned unexpected error")
 			return nil
 		}
-
-		if len(c.Options.Name) == 0 {
-			c.logicalTag = c.buildNodeTag(newN)
-			c.runtimeKey = format.RuntimeKey(c.coreType, c.logicalTag)
-			limiter.DeleteLimiter(c.coreType, oldLogicalTag)
-			c.limiter = limiter.AddLimiter(c.coreType, c.logicalTag, &c.LimitConfig, c.userList, newA)
-		}
-		if newA != nil {
-			c.limiter.AliveList.Replace(newA)
-		}
-
-		if needsCert(protocolSecurity(newN)) && c.CertConfig != nil {
-			le := log.WithFields(c.logFields())
-			if _, err = EnsureCertificate(c.CertConfig, le); err != nil {
-				log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Ensure cert failed")
-				return nil
-			}
-		}
-		err = c.server.AddNode(c.runtimeKey, newN, c.Options)
-		if err != nil {
-			log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Add node failed")
-			return nil
-		}
-		_, err = c.server.AddUsers(&vCore.AddUsersParams{
-			Tag:      c.runtimeKey,
-			Users:    c.userList,
-			NodeInfo: newN,
-		})
-		if err != nil {
-			log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Add users failed")
-			return nil
-		}
-		if c.nodeInfoMonitorPeriodic.Interval != newN.PullInterval && newN.PullInterval != 0 {
-			c.nodeInfoMonitorPeriodic.Interval = newN.PullInterval
-			c.nodeInfoMonitorPeriodic.Close()
-			_ = c.nodeInfoMonitorPeriodic.Start(false)
-		}
-		if c.userReportPeriodic.Interval != newN.PushInterval && newN.PushInterval != 0 {
-			c.userReportPeriodic.Interval = newN.PushInterval
-			c.userReportPeriodic.Close()
-			_ = c.userReportPeriodic.Start(false)
-		}
-		log.WithFields(c.logFields()).Infof("Added %d new users", len(c.userList))
+		c.adjustPeriodicIntervals(newN)
 		return nil
 	}
 	if newA != nil {
