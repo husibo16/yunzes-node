@@ -10,6 +10,11 @@ import (
 type ManagedWriter struct {
 	writer  buf.Writer
 	manager *LinkManager
+	// release, if non-nil, is invoked exactly once on Close. Used by the
+	// dispatcher to release ConnLimiter slots when a TCP link tears down
+	// in realtime mode. Non-TCP / non-realtime paths leave it nil.
+	release     func()
+	releaseOnce sync.Once
 }
 
 func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -18,6 +23,9 @@ func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 
 func (w *ManagedWriter) Close() error {
 	w.manager.RemoveWriter(w)
+	if w.release != nil {
+		w.releaseOnce.Do(w.release)
+	}
 	return common.Close(w.writer)
 }
 

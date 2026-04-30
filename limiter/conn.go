@@ -98,37 +98,67 @@ func (c *ConnLimiter) AddConnCount(user string, ip string, isTcp bool) (limit bo
 	return
 }
 
-// DelConnCount Delete tcp connection count, no tcp do not use
+// IsRealtime reports whether this ConnLimiter was constructed with the
+// realtime flag. Data-path call sites use this to decide whether to
+// install a Close-fires-DelConnCount hook on a per-connection wrapper —
+// in non-realtime mode the IP counter stores time.Time (GC'd by
+// ClearOnlineIP), so a precise per-close release would do the wrong
+// thing for that branch.
+func (c *ConnLimiter) IsRealtime() bool {
+	return c.realtime
+}
+
+// DelConnCount releases counters previously claimed by AddConnCount for
+// the same (user, ip) on a TCP connection. Call exactly once when the
+// connection closes; idempotent at the caller via sync.Once. Non-TCP
+// callers must not invoke this — only TCP increments are paired.
+//
+// Two bugs in the previous implementation:
+//
+//  1. The IP-counter decrement stored back to the inner per-user map
+//     using `user` as the key. The inner map is keyed by `ip` — the
+//     wrong-key write both failed to decrement the real entry and
+//     injected a phantom `ips[user] = N` slot that AddConnCount's
+//     `ips.Range(cn++)` would later count as an "online IP", inflating
+//     the user's IP count and rejecting future legitimate connections.
+//
+//  2. The empty-inner-map check ranged over c.ip (the outer user→ipMap
+//     map) instead of `is` (this user's inner map). Result: the user's
+//     empty inner map was never reaped from c.ip, leaving a stale
+//     entry behind on every full-close cycle.
+//
+// Also lifted the early `if !c.realtime { return }` so the connLimit
+// counter — which is a plain int populated in both modes — gets
+// decremented in non-realtime mode too. The IP-counter branch keeps
+// the realtime gate because non-realtime stores time.Time, not int,
+// and that branch is GC'd by ClearOnlineIP based on age.
 func (c *ConnLimiter) DelConnCount(user string, ip string) {
-	if !c.realtime {
-		return
-	}
 	if c.connLimit != 0 {
 		if v, ok := c.count.Load(user); ok {
-			if v.(int) == 1 {
+			if v.(int) <= 1 {
 				c.count.Delete(user)
 			} else {
 				c.count.Store(user, v.(int)-1)
 			}
 		}
 	}
-	if c.ipLimit == 0 {
+	if c.ipLimit == 0 || !c.realtime {
 		return
 	}
 	if i, ok := c.ip.Load(user); ok {
 		is := i.(*sync.Map)
-		if i, ok := is.Load(ip); ok {
-			if i.(int) == 2 {
+		if v, ok := is.Load(ip); ok {
+			if v.(int) <= 2 {
 				is.Delete(ip)
 			} else {
-				is.Store(user, i.(int)-2)
+				is.Store(ip, v.(int)-2)
 			}
-			notDel := false
-			c.ip.Range(func(_, _ any) bool {
-				notDel = true
+			empty := true
+			is.Range(func(_, _ any) bool {
+				empty = false
 				return false
 			})
-			if !notDel {
+			if empty {
 				c.ip.Delete(user)
 			}
 		}

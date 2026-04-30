@@ -72,12 +72,23 @@ func (h *HookServer) RoutedConnection(_ context.Context, conn net.Conn, m adapte
 		return conn
 	}
 	ip := m.Source.Addr.String()
-	if b, r := l.CheckLimit(format.UserTag(m.Inbound, m.User), ip, true, true); r {
+	taguuid := format.UserTag(m.Inbound, m.User)
+	if b, r := l.CheckLimit(taguuid, ip, true, true); r {
 		conn.Close()
 		log.Error("[", m.Inbound, "] ", "Limited ", m.User, " by ip or conn")
 		return conn
 	} else if b != nil {
 		conn = rate.NewConnRateLimiter(conn, b)
+	}
+	// On TCP teardown in realtime mode, release the ConnLimiter slots
+	// that AddConnCount claimed. Skipped in non-realtime mode since the
+	// IP-counter branch there stores time.Time and is GC'd by
+	// ClearOnlineIP based on age. Wrapping uses sync.Once so a duplicate
+	// Close (sing-box and the caller can both close) only fires the
+	// release once.
+	if l.ConnLimiter != nil && l.ConnLimiter.IsRealtime() {
+		cl := l.ConnLimiter
+		conn = &releaseConn{Conn: conn, release: func() { cl.DelConnCount(taguuid, ip) }}
 	}
 	if h.EnableConnClear {
 		cc := &ConnClear{

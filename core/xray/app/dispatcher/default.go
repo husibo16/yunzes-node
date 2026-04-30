@@ -206,6 +206,19 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 			writer:  uplinkWriter,
 			manager: lm,
 		}
+		// On TCP-link teardown in realtime mode, release the ConnLimiter
+		// slots that AddConnCount claimed at CheckLimit time. Without
+		// this, the per-user TCP count is monotonically increasing and
+		// every operator with ConnLimit>0 + realtime starts blocking
+		// legitimate users once the cumulative session count crosses the
+		// limit. UDP-on-TCP-link is rare and AddConnCount only counts
+		// TCP, so gating the hook on TCP is correct.
+		if network == net.Network_TCP && limit.ConnLimiter != nil && limit.ConnLimiter.IsRealtime() {
+			taguuid := user.Email
+			ipStr := sessionInbound.Source.Address.IP().String()
+			cl := limit.ConnLimiter
+			managedWriter.release = func() { cl.DelConnCount(taguuid, ipStr) }
+		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
 		if w != nil {
@@ -398,6 +411,15 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
 			manager: lm,
+		}
+		// Mirror getLink: release ConnLimiter slots on TCP teardown in
+		// realtime mode. AddConnCount above used the same TCP test so
+		// the gate matches.
+		if destination.Network == net.Network_TCP && limit.ConnLimiter != nil && limit.ConnLimiter.IsRealtime() {
+			taguuid := user.Email
+			ipStr := sessionInbound.Source.Address.IP().String()
+			cl := limit.ConnLimiter
+			managedWriter.release = func() { cl.DelConnCount(taguuid, ipStr) }
 		}
 		outbound.Writer = managedWriter
 		if w != nil {
