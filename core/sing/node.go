@@ -61,7 +61,21 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 		security = "tls"
 		servername = info.Common.AnyTLS.SecurityConfig.SNI
 	default:
-		fmt.Println("Unknown protocol:", info.Common.Protocol)
+		// Return a real error instead of fmt.Println'ing to stdout —
+		// the previous shape was three things wrong:
+		//   1. bypassed the structured logger (no level, no fields,
+		//      invisible under systemd journal)
+		//   2. function continued past the switch with port=0 and
+		//      then dereferenced c.SingOptions, which nil-panics
+		//      when the operator omitted SingOptions
+		//   3. when SingOptions was non-nil the function returned a
+		//      half-built Inbound with empty Options; the actual
+		//      failure surfaced deep inside sing-box's in.Create
+		//      with no protocol-name context for the operator.
+		// AddNode (the only caller) already propagates the returned
+		// error up to controller.Start / reload where it gets logged
+		// with the full controller / runtime-key context.
+		return option.Inbound{}, fmt.Errorf("unsupported sing protocol: %q", info.Common.Protocol)
 	}
 
 	listen := option.ListenOptions{
