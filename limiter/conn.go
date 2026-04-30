@@ -23,79 +23,110 @@ func NewConnLimiter(conn int, ip int, realtime bool) *ConnLimiter {
 	}
 }
 
+// AddConnCount admits or rejects a (user, ip) connect attempt against
+// connLimit (per-user TCP-conn cap) and ipLimit (per-user concurrent-IP
+// cap). Returns true to reject.
+//
+// Transactional structure: Phase 1 does ALL the will-block checks
+// without mutating any counter; Phase 2 mutates only after every check
+// has passed. The previous shape interleaved the two — the connLimit
+// counter was incremented BEFORE the ipLimit cap was checked, so an
+// ipLimit-driven reject leaked +1 on the TCP count for every blocked
+// attempt. Callers don't pair AddConnCount with DelConnCount on the
+// reject path (they close the link without going through the
+// ManagedWriter / releaseConn close hook), so the leak was permanent.
+//
+// The check-then-mutate split is the standard fix; the residual races
+// (two goroutines both passing Phase 1, both incrementing in Phase 2,
+// landing at v+1 instead of v+2) match the original behavior — they're
+// benign over-allocation by 1, never under-allocation, and not the
+// concern of this fix.
 func (c *ConnLimiter) AddConnCount(user string, ip string, isTcp bool) (limit bool) {
+	// Phase 1 — read-only will-block checks.
+
 	if c.connLimit != 0 {
-		if v, ok := c.count.Load(user); ok {
-			if v.(int) >= c.connLimit {
-				// over connection limit
-				return true
-			} else if isTcp {
-				// tcp protocol
-				// connection count add
-				c.count.Store(user, v.(int)+1)
+		if v, ok := c.count.Load(user); ok && v.(int) >= c.connLimit {
+			return true
+		}
+	}
+
+	// ipLimit applies only to existing users — a brand-new user always
+	// gets their first IP through, matching the original semantics.
+	var existingIPs *sync.Map
+	var ipAlreadyOnline bool
+	if c.ipLimit != 0 {
+		if v, ok := c.ip.Load(user); ok {
+			existingIPs = v.(*sync.Map)
+			if _, online := existingIPs.Load(ip); online {
+				ipAlreadyOnline = true
+			} else {
+				cn := 0
+				existingIPs.Range(func(_, _ any) bool {
+					cn++
+					return cn < c.ipLimit
+				})
+				if cn >= c.ipLimit {
+					return true
+				}
 			}
-		} else if isTcp {
-			// tcp protocol
-			// store connection count
+		}
+	}
+
+	// Phase 2 — mutate. Every check has passed.
+
+	if c.connLimit != 0 && isTcp {
+		if v, ok := c.count.Load(user); ok {
+			c.count.Store(user, v.(int)+1)
+		} else {
 			c.count.Store(user, 1)
 		}
 	}
+
 	if c.ipLimit == 0 {
 		return false
 	}
-	// first user map
-	ipMap := new(sync.Map)
+	if existingIPs == nil {
+		// First-time user. Atomically install a fresh per-user map with
+		// the new ip already inside. If a concurrent goroutine got there
+		// first, fall through to the existing-user store path.
+		first := new(sync.Map)
+		c.storeIPSlot(first, ip, isTcp)
+		if v, loaded := c.ip.LoadOrStore(user, first); loaded {
+			existingIPs = v.(*sync.Map)
+		} else {
+			return false
+		}
+	}
+	if ipAlreadyOnline {
+		if c.realtime {
+			if isTcp {
+				if online, ok := existingIPs.Load(ip); ok {
+					existingIPs.Store(ip, online.(int)+2)
+				}
+			}
+		} else {
+			existingIPs.Store(ip, time.Now())
+		}
+		return false
+	}
+	c.storeIPSlot(existingIPs, ip, isTcp)
+	return false
+}
+
+// storeIPSlot writes the per-IP slot into a per-user inner map under the
+// realtime / non-realtime conventions used by the rest of ConnLimiter:
+// realtime stores an int (1 for non-TCP first-online, 2 for TCP), non-
+// realtime stores the connect timestamp (cleaned up by ClearOnlineIP).
+func (c *ConnLimiter) storeIPSlot(ips *sync.Map, ip string, isTcp bool) {
 	if c.realtime {
 		if isTcp {
-			ipMap.Store(ip, 2)
+			ips.Store(ip, 2)
 		} else {
-			ipMap.Store(ip, 1)
+			ips.Store(ip, 1)
 		}
 	} else {
-		ipMap.Store(ip, time.Now())
+		ips.Store(ip, time.Now())
 	}
-	// check user online ip
-	if v, ok := c.ip.LoadOrStore(user, ipMap); ok {
-		// have user
-		ips := v.(*sync.Map)
-		cn := 0
-		if online, ok := ips.Load(ip); ok {
-			// online ip
-			if c.realtime {
-				if isTcp {
-					// tcp count add
-					ips.Store(ip, online.(int)+2)
-				}
-			} else {
-				// update connect time for not realtime
-				ips.Store(ip, time.Now())
-			}
-		} else {
-			// not online ip
-			ips.Range(func(_, _ interface{}) bool {
-				cn++
-				if cn >= c.ipLimit {
-					limit = true
-					return false
-				}
-				return true
-			})
-			if limit {
-				// over ip limit
-				return
-			}
-			if c.realtime {
-				if isTcp {
-					ips.Store(ip, 2)
-				} else {
-					ips.Store(ip, 1)
-				}
-			} else {
-				ips.Store(ip, time.Now())
-			}
-		}
-	}
-	return
 }
 
 // IsRealtime reports whether this ConnLimiter was constructed with the
