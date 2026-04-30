@@ -35,6 +35,15 @@ type CommonNode struct {
 type BasicConfig struct {
 	PushInterval any `json:"push_interval"`
 	PullInterval any `json:"pull_interval"`
+	// TrafficReportThreshold (bytes). When non-zero, Controller's
+	// reportUserTrafficTask drops any per-user delta where
+	// upload+download <= threshold before pushing to the panel — same
+	// predicate the panel applies on its receive path
+	// (queue/logic/traffic/trafficStatisticsLogic.go), so node-side
+	// filtering is purely a bandwidth/CPU optimization, not a
+	// behavioural change. Zero value (old panels that don't emit the
+	// field) disables filtering and keeps legacy behavior.
+	TrafficReportThreshold int64 `json:"traffic_report_threshold"`
 }
 
 type SecurityConfig struct {
