@@ -398,6 +398,35 @@ func TestReloadNodeConfig_InvalidListenerSpecAbortsBeforeDelNode(t *testing.T) {
 	}
 }
 
+// TestReloadNodeConfig_EmptyUserListSkipsAddUsers — module 6
+// regression. Reloading to a 0-user state is a legitimate operator
+// action (panel removed every user). Reload must succeed AND must
+// not call AddUsers with an empty slice.
+func TestReloadNodeConfig_EmptyUserListSkipsAddUsers(t *testing.T) {
+	f := newReloadFixture(t, "pinned-tag")
+	defer f.cleanup()
+
+	newN := vlessNode(2, 8443)
+	var emptyUsers []panel.UserInfo
+
+	if err := f.c.reloadNodeConfig(newN, emptyUsers, nil); err != nil {
+		t.Fatalf("reload error on empty user list: %v", err)
+	}
+	got := f.core.callsCopy()
+	want := []string{
+		"DelNode:" + f.c.runtimeKey,
+		"AddNode:" + f.c.runtimeKey,
+		// Notably absent: "AddUsers:..." — must be skipped on empty input.
+	}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("call sequence:\n got: %v\nwant: %v", got, want)
+	}
+	// State commits: c.userList becomes the empty slice.
+	if len(f.c.userList) != 0 {
+		t.Fatalf("userList = %d, want 0 after empty-list reload", len(f.c.userList))
+	}
+}
+
 // TestReloadNodeConfig_NilNewNReturnsError documents the contract
 // that the helper must not be called without a NodeInfo (the caller
 // in nodeInfoMonitor only calls it when newN != nil).

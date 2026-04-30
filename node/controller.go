@@ -1,7 +1,6 @@
 package node
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/husibo16/yunzes-node/api/panel"
@@ -192,8 +191,16 @@ func (c *Controller) Start() (err error) {
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
+	// 0-user nodes used to be rejected outright with "not have any user".
+	// In production this prevented a freshly-added node from starting at
+	// all until an operator subscribed at least one user — even when the
+	// inbound was otherwise valid. Both cores' AddUsers are no-op safe
+	// with an empty slice (xray's range-loop simply does not iterate;
+	// sing builds zero-length option slices), so we now warn and proceed.
+	// nodeInfoMonitor's incremental branch will pick up users on the
+	// next pull and call AddUsers via UpdateUser.
 	if len(c.userList) == 0 {
-		return errors.New("add users error: not have any user")
+		log.WithFields(c.logFields()).Warn("Starting node with 0 users; nodeInfoMonitor will pick them up on the next pull")
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive()
 	if err != nil {
@@ -234,15 +241,22 @@ func (c *Controller) Start() (err error) {
 	}
 	addedNode = true
 
-	added, err := c.server.AddUsers(&vCore.AddUsersParams{
-		Tag:      c.runtimeKey,
-		Users:    c.userList,
-		NodeInfo: node,
-	})
-	if err != nil {
-		return fmt.Errorf("add users error: %s", err)
+	// Skip AddUsers entirely when the panel returned 0 users. The cores
+	// would treat an empty slice as a no-op anyway, but skipping the
+	// call avoids feeding edge-case empty state into upstream sing-box /
+	// xray-core inbound user-managers and makes the "0 users at start"
+	// flow line up with the warn we logged above.
+	if len(c.userList) > 0 {
+		added, err := c.server.AddUsers(&vCore.AddUsersParams{
+			Tag:      c.runtimeKey,
+			Users:    c.userList,
+			NodeInfo: node,
+		})
+		if err != nil {
+			return fmt.Errorf("add users error: %s", err)
+		}
+		log.WithFields(c.logFields()).Infof("Added %d new users", added)
 	}
-	log.WithFields(c.logFields()).Infof("Added %d new users", added)
 	c.info = node
 	if err = c.startTasks(node); err != nil {
 		return fmt.Errorf("start tasks error: %s", err)

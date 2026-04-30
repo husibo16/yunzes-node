@@ -109,10 +109,18 @@ type Hysteria2Node struct {
 }
 
 type ServerPushStatusRequest struct {
-	Cpu       float64 `json:"cpu"`
-	Mem       float64 `json:"mem"`
-	Disk      float64 `json:"disk"`
-	UpdatedAt int64   `json:"updated_at"`
+	Cpu  float64 `json:"cpu"`
+	Mem  float64 `json:"mem"`
+	Disk float64 `json:"disk"`
+	// Uptime is host uptime in seconds, sourced from
+	// serverstatus.GetSystemInfo() (which reads it from gopsutil's
+	// host.Uptime). NodeStatus has carried the field for a while but
+	// ReportNodeStatus used to drop it on the floor — the request
+	// struct was missing it. Old panel servers that don't know about
+	// "uptime" silently ignore the extra JSON field; new servers can
+	// surface it on their dashboards.
+	Uptime    uint64 `json:"uptime"`
+	UpdatedAt int64  `json:"updated_at"`
 }
 
 type NodeStatus struct {
@@ -220,6 +228,7 @@ func (c *Client) ReportNodeStatus(nodeStatus *NodeStatus) (err error) {
 		Cpu:       nodeStatus.CPU,
 		Mem:       nodeStatus.Mem,
 		Disk:      nodeStatus.Disk,
+		Uptime:    nodeStatus.Uptime,
 		UpdatedAt: time.Now().UnixMilli(),
 	}
 	if _, err = c.Client.R().SetBody(status).ForceContentType("application/json").Post(path); err != nil {

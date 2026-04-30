@@ -146,16 +146,18 @@ func (c *Controller) reloadNodeConfig(newN *panel.NodeInfo, newU []panel.UserInf
 			})).Error("ROLLBACK FAILED: AddNode(old) errored; node is OFFLINE until next pull")
 			return
 		}
-		if _, rbErr := c.server.AddUsers(&vCore.AddUsersParams{
-			Tag:      old.runtimeKey,
-			Users:    old.userList,
-			NodeInfo: old.info,
-		}); rbErr != nil {
-			log.WithFields(mergeFields(logFields(), log.Fields{
-				"stage": stage,
-				"err":   rbErr,
-			})).Error("ROLLBACK PARTIAL: old inbound up but AddUsers(old) failed")
-			return
+		if len(old.userList) > 0 {
+			if _, rbErr := c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      old.runtimeKey,
+				Users:    old.userList,
+				NodeInfo: old.info,
+			}); rbErr != nil {
+				log.WithFields(mergeFields(logFields(), log.Fields{
+					"stage": stage,
+					"err":   rbErr,
+				})).Error("ROLLBACK PARTIAL: old inbound up but AddUsers(old) failed")
+				return
+			}
 		}
 		log.WithFields(logFields()).Info("rollback successful: old node restored")
 	}
@@ -165,20 +167,26 @@ func (c *Controller) reloadNodeConfig(newN *panel.NodeInfo, newU []panel.UserInf
 		return nil
 	}
 
-	if _, err := c.server.AddUsers(&vCore.AddUsersParams{
-		Tag:      newRuntimeKey,
-		Users:    newU,
-		NodeInfo: newN,
-	}); err != nil {
-		// Tear down the partially-installed new inbound before re-installing
-		// the old one. DelNode is idempotent; ignoring its error is safe
-		// since rollback's AddNode(old) is what actually restores service.
-		if delErr := c.server.DelNode(newRuntimeKey); delErr != nil {
-			log.WithFields(mergeFields(logFields(), log.Fields{"err": delErr})).
-				Warn("during rollback: DelNode(new) failed; AddNode(old) will still restore")
+	// Skip AddUsers when the panel reported 0 users — same rationale as
+	// Controller.Start's empty-user gate. Reloading to a 0-user state is
+	// a legitimate operator action (panel just removed every user) and
+	// must not fail the swap.
+	if len(newU) > 0 {
+		if _, err := c.server.AddUsers(&vCore.AddUsersParams{
+			Tag:      newRuntimeKey,
+			Users:    newU,
+			NodeInfo: newN,
+		}); err != nil {
+			// Tear down the partially-installed new inbound before re-installing
+			// the old one. DelNode is idempotent; ignoring its error is safe
+			// since rollback's AddNode(old) is what actually restores service.
+			if delErr := c.server.DelNode(newRuntimeKey); delErr != nil {
+				log.WithFields(mergeFields(logFields(), log.Fields{"err": delErr})).
+					Warn("during rollback: DelNode(new) failed; AddNode(old) will still restore")
+			}
+			rollback("AddUsers", err)
+			return nil
 		}
-		rollback("AddUsers", err)
-		return nil
 	}
 
 	// Success — commit the new state. The order is: identifiers first
