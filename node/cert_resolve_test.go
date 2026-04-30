@@ -202,3 +202,65 @@ func TestResolveCertConfig_DNSEnvPassthroughDoesNotPanic(t *testing.T) {
 		t.Errorf("DNSEnv map not propagated")
 	}
 }
+
+// TestResolveCertConfig_FlatCertFieldsPopulateDNSMode covers the wire
+// format the panel server actually emits today: nested CertConfig is
+// nil, but flat CertMode / CertDNSProvider / CertDNSEnv are populated
+// from the admin form. Before this codepath existed, admins setting
+// CertMode=dns saw their setting silently downgraded to "http" because
+// resolveCertConfig hardcoded that mode whenever CertConfig was nil.
+func TestResolveCertConfig_FlatCertFieldsPopulateDNSMode(t *testing.T) {
+	p := panel.ProtocolConfig{
+		Type:            "trojan",
+		Security:        "tls",
+		SNI:             "vpn.example.com",
+		CertMode:        "dns",
+		CertDNSProvider: "cloudflare",
+		CertDNSEnv:      "CF_DNS_API_TOKEN=tok-abc\nCF_ACCOUNT_ID=acc-xyz",
+	}
+	got := resolveCertConfig(p, "trojan", 7)
+
+	if got.CertMode != "dns" {
+		t.Errorf("CertMode = %q, want \"dns\"", got.CertMode)
+	}
+	if got.CertDomain != "vpn.example.com" {
+		t.Errorf("CertDomain = %q, want %q", got.CertDomain, "vpn.example.com")
+	}
+	if got.Provider != "cloudflare" {
+		t.Errorf("Provider = %q, want \"cloudflare\"", got.Provider)
+	}
+	wantEnv := map[string]string{
+		"CF_DNS_API_TOKEN": "tok-abc",
+		"CF_ACCOUNT_ID":    "acc-xyz",
+	}
+	if !reflect.DeepEqual(got.DNSEnv, wantEnv) {
+		t.Errorf("DNSEnv = %v, want %v", got.DNSEnv, wantEnv)
+	}
+}
+
+func TestParseFlatDNSEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want map[string]string
+	}{
+		{"empty", "", nil},
+		{"whitespace only", "   \n  \t  \n", nil},
+		{"single", "K=V", map[string]string{"K": "V"}},
+		{"multiple lines", "A=1\nB=2\nC=3", map[string]string{"A": "1", "B": "2", "C": "3"}},
+		{"blank lines skipped", "A=1\n\nB=2\n\n", map[string]string{"A": "1", "B": "2"}},
+		{"surrounding whitespace trimmed", "  A = 1 \n B=2\n", map[string]string{"A": "1", "B": "2"}},
+		{"value with equals preserved", "TOKEN=abc=def=ghi", map[string]string{"TOKEN": "abc=def=ghi"}},
+		{"line without equals skipped", "GOOD=1\njunk-no-equals\nALSO=2", map[string]string{"GOOD": "1", "ALSO": "2"}},
+		{"empty key skipped", "=val\nGOOD=ok", map[string]string{"GOOD": "ok"}},
+		{"only invalid lines returns nil", "no-equals\nanother", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := parseFlatDNSEnv(c.in)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("parseFlatDNSEnv(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}

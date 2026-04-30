@@ -162,8 +162,8 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 				Path:        p.Path,
 				Host:        p.Host,
 				ServiceName: p.ServiceName,
-				Mode:        p.Mode,
-				Extra:       p.Extra,
+				Mode:        p.XhttpMode,
+				Extra:       p.XhttpExtra,
 			},
 			Security: p.Security,
 			SecurityConfig: &panel.SecurityConfig{
@@ -183,8 +183,8 @@ func buildServerController(apiConfig *conf.ServerApiConfig, p panel.ProtocolConf
 				Path:        p.Path,
 				Host:        p.Host,
 				ServiceName: p.ServiceName,
-				Mode:        p.Mode,
-				Extra:       p.Extra,
+				Mode:        p.XhttpMode,
+				Extra:       p.XhttpExtra,
 			},
 			Security: p.Security,
 			SecurityConfig: &panel.SecurityConfig{

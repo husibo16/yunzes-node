@@ -2,10 +2,43 @@ package node
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/husibo16/yunzes-node/api/panel"
 	"github.com/husibo16/yunzes-node/conf"
 )
+
+// parseFlatDNSEnv turns the panel admin's "KEY=VALUE\nKEY=VALUE" textarea
+// string (carried on the wire as p.CertDNSEnv) into the map[string]string
+// shape that lego.go consumes. Blank lines and lines without "=" are
+// skipped silently. Whitespace around keys/values is trimmed; values are
+// preserved verbatim otherwise so secrets containing "=" round-trip.
+func parseFlatDNSEnv(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		if key == "" {
+			continue
+		}
+		out[key] = val
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 // defaultPanelCertFile / defaultPanelCertKey return the on-disk paths the
 // panel-driven controller pins TLS certs to when the server doesn't
@@ -60,13 +93,24 @@ func resolveCertConfig(p panel.ProtocolConfig, nodeType string, nodeId int) *con
 	defKeyFile := defaultPanelCertKey(nodeType, nodeId)
 
 	if p.CertConfig == nil {
-		// Old server: legacy hardcoded behavior.
+		// No nested cert_config object on the wire. Today the panel server
+		// does NOT emit one — it ships flat cert_mode / cert_dns_provider /
+		// cert_dns_env fields instead — so try those before falling back
+		// to the legacy HTTP-01 hardcode. Without this, admins setting
+		// CertMode=dns in the panel had their setting silently downgraded
+		// to "http".
+		mode := p.CertMode
+		if mode == "" {
+			mode = "http"
+		}
 		return &conf.CertConfig{
-			CertMode:         "http",
+			CertMode:         mode,
 			RejectUnknownSni: false,
 			CertDomain:       p.SNI,
 			CertFile:         defCertFile,
 			KeyFile:          defKeyFile,
+			Provider:         p.CertDNSProvider,
+			DNSEnv:           parseFlatDNSEnv(p.CertDNSEnv),
 		}
 	}
 

@@ -100,8 +100,15 @@ type ProtocolConfig struct {
 	Host                string `json:"host"`
 	Path                string `json:"path"`
 	ServiceName         string `json:"service_name"`
-	Mode                string `json:"mode"`
-	Extra               string `json:"extra"`
+	// XhttpMode / XhttpExtra are the xhttp transport's "mode" and "extra"
+	// settings. The wire JSON keys are xhttp_mode / xhttp_extra (matching
+	// the panel's flat Protocol struct); the local Go fields stay
+	// PascalCase. They feed into TransportConfig.Mode / TransportConfig.Extra
+	// in buildServerController. Older nodes used to parse "mode" / "extra"
+	// as the JSON keys, which silently dropped the value because the panel
+	// always sent xhttp_mode / xhttp_extra.
+	XhttpMode           string `json:"xhttp_mode"`
+	XhttpExtra          string `json:"xhttp_extra"`
 	Cipher              string `json:"cipher"`
 	ServerKey           string `json:"server_key"`
 	Flow                string `json:"flow"`
@@ -110,12 +117,21 @@ type ProtocolConfig struct {
 	UpMbps              int    `json:"up_mbps"`
 	DownMbps            int    `json:"down_mbps"`
 	EnableProxyProtocol bool   `json:"enable_proxy_protocol"`
+	// Flat cert_* fields the panel server ships in its types.Protocol DTO.
+	// resolveCertConfig consumes these when CertConfig (the nested object
+	// below) is nil — without this, admins who set CertMode=dns/file/self
+	// in the panel had their setting silently downgraded to "http" because
+	// the legacy fallback hardcoded that mode.
+	CertMode        string `json:"cert_mode,omitempty"`
+	CertDNSProvider string `json:"cert_dns_provider,omitempty"`
+	CertDNSEnv      string `json:"cert_dns_env,omitempty"` // "KEY=VALUE\n..." textarea form
 	// CertConfig, if non-nil, lets the panel server override the
 	// hardcoded ACME HTTP-01 default that the panel-driven controller
 	// previously baked in for every Security="tls" protocol. Old servers
 	// that don't yet send this field leave the pointer nil and the node
-	// falls back to the legacy behavior (HTTP-01 + p.SNI + the
-	// /etc/yunzes-node/certs/<type><id>.{crt,key} default paths). New
+	// falls back to the flat CertMode / CertDNSProvider / CertDNSEnv above
+	// (or, if those are also empty, to the legacy HTTP-01 default with
+	// p.SNI and /etc/yunzes-node/certs/<type><id>.{crt,key} paths). New
 	// servers can set CertMode to dns/file/self/none and supply
 	// Provider / Email / DNSEnv / RenewBeforeDays / explicit cert paths.
 	// Resolution lives in node.resolveCertConfig.
