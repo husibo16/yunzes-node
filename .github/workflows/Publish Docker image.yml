@@ -12,7 +12,13 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/yunzes-node
 
 jobs:
+  # Same gate as release.yml — never ship a Docker image that hasn't
+  # passed gofmt / vet / test / race / production-tag build.
+  test:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

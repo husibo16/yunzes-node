@@ -23,7 +23,15 @@ on:
 
 jobs:
 
+  # Run the full test/lint/race/build suite before any release artifact
+  # is built. C6–C13 fixed concurrency, reload, limiter and lifecycle
+  # bugs that ship via this workflow; gating release on test.yml prevents
+  # regressions from reaching tagged binaries.
+  test:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: test
     strategy:
       matrix:
         # Include amd64 on all platforms.

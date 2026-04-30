@@ -1,0 +1,138 @@
+name: Tests & Lint
+
+# C6–C13 added significant test coverage (limiter race tests, conn-release
+# tests, reload rollback at both controller and cmd layers, cert-resolve
+# tests, traffic-guard tests, etc). Before C14 none of it was exercised by
+# CI — release.yml only builds, codeql-analysis.yml only static-analyzes,
+# Publish Docker image.yml only packages. This workflow closes that gap.
+#
+# It runs on push / PR independently so PR review surfaces test status,
+# AND is callable via workflow_call so release.yml and Publish Docker
+# image.yml can `needs: test` on it before shipping a binary or image.
+#
+# The four jobs are intentionally NOT chained (no `needs:` between them):
+# operators want full signal in a single run. A gofmt failure should not
+# hide a concurrent test regression.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - develop
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/test.yml"
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/test.yml"
+
+env:
+  # All Go commands across the repo run with this experiment flag (the
+  # codebase imports encoding/json/v2 + encoding/json/jsontext). Keep in
+  # sync with release.yml.
+  GOEXPERIMENT: jsonv2
+  GO_VERSION: "1.25.0"
+
+jobs:
+  lint:
+    name: gofmt + go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt -l (must be empty)
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+          echo "gofmt: clean"
+
+      - name: go vet ./...
+        run: go vet ./...
+
+  test:
+    name: go test ./...
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+
+      - name: go test -count=1 ./...
+        # 5m is generous; the slowest package (limiter) takes ~60s
+        # because TestConnLimiter_ClearOnlineIP sleeps a full minute.
+        run: go test -count=1 -timeout 5m ./...
+
+  race:
+    name: go test -race (hot packages)
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+
+      - name: go test -race on packages with concurrency surface
+        # Hot-path packages where C6–C13 fixed concurrency / lifecycle
+        # bugs and added explicit race tests:
+        #   limiter   — AliveStore / trafficStore / ConnLimiter
+        #   node      — reload rollback, traffic-guard, dynamic limit
+        #   core/sing — ConnLimiter close hook
+        #   dispatcher (xray) — ManagedWriter release hook
+        #   cmd       — file-watch reload orchestration
+        run: |
+          go test -race -count=1 -timeout 10m \
+            ./limiter/... \
+            ./node/... \
+            ./core/sing/... \
+            ./core/xray/app/dispatcher/... \
+            ./cmd/...
+
+  build:
+    name: build with production tags (linux/amd64)
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+
+      - name: go build (production tag set)
+        # Mirrors release.yml's tag list so a tag-incompatibility never
+        # ships untested. release.yml owns the GOOS/GOARCH matrix; this
+        # job exists to catch tag-set / import-cycle regressions on the
+        # primary linux/amd64 target before the release matrix runs.
+        run: |
+          go build -v -o /tmp/yunzes-node \
+            -tags "sing xray with_quic with_grpc with_utls with_wireguard with_acme with_gvisor" \
+            -trimpath \
+            -ldflags "-X 'github.com/husibo16/yunzes-node/cmd.version=ci' -s -w -buildid="
+          ls -lh /tmp/yunzes-node
