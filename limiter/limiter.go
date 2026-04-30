@@ -47,7 +47,11 @@ type Limiter struct {
 	UserLimitInfo *sync.Map      // Key: runtimeKey|uuid, value: UserLimitInfo
 	ConnLimiter   *ConnLimiter   // Key: runtimeKey|uuid value: ConnLimiter
 	SpeedLimiter  *sync.Map      // Key: runtimeKey|uuid, value: *ratelimit.Bucket
-	AliveList     map[int]int    // Key: Uid, value: alive_ip
+	// AliveList is the concurrency-safe view of /v1/server/alivelist.
+	// CheckLimit reads it on the data path while nodeInfoMonitor /
+	// UpdateUser write to it from the control plane, so it must never be
+	// touched as a bare map — go through the AliveStore methods only.
+	AliveList *AliveStore // Key: Uid, value: alive_ip
 }
 
 type UserLimitInfo struct {
@@ -75,7 +79,7 @@ func AddLimiter(coreType, logicalTag string, l *conf.LimitConfig, users []panel.
 		UserLimitInfo: new(sync.Map),
 		ConnLimiter:   NewConnLimiter(l.ConnLimit, l.IPLimit, l.EnableRealtime),
 		SpeedLimiter:  new(sync.Map),
-		AliveList:     aliveList,
+		AliveList:     NewAliveStore(aliveList),
 		OldUserOnline: new(sync.Map),
 	}
 	uuidmap := make(map[string]int)
@@ -129,7 +133,7 @@ func (l *Limiter) UpdateUser(runtimeKey string, added []panel.UserInfo, deleted 
 		l.UserOnlineIP.Delete(format.UserTag(runtimeKey, deleted[i].Uuid))
 		l.SpeedLimiter.Delete(format.UserTag(runtimeKey, deleted[i].Uuid))
 		delete(l.UUIDtoUID, deleted[i].Uuid)
-		delete(l.AliveList, deleted[i].Id)
+		l.AliveList.Delete(deleted[i].Id)
 	}
 	for i := range added {
 		userLimit := &UserLimitInfo{
@@ -194,7 +198,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		// Store online user for device limit
 		ipMap := new(sync.Map)
 		ipMap.Store(ip, uid)
-		aliveIp := l.AliveList[uid]
+		aliveIp := l.AliveList.Get(uid)
 		// If any device is online
 		if v, ok := l.UserOnlineIP.LoadOrStore(taguuid, ipMap); ok {
 			ipMap := v.(*sync.Map)

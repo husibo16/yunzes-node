@@ -112,7 +112,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			c.limiter = limiter.AddLimiter(c.coreType, c.logicalTag, &c.LimitConfig, c.userList, newA)
 		}
 		if newA != nil {
-			c.limiter.AliveList = newA
+			c.limiter.AliveList.Replace(newA)
 		}
 
 		if needsCert(protocolSecurity(newN)) && c.CertConfig != nil {
@@ -150,7 +150,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		return nil
 	}
 	if newA != nil {
-		c.limiter.AliveList = newA
+		c.limiter.AliveList.Replace(newA)
 	}
 	if len(newU) == 0 {
 		return nil
