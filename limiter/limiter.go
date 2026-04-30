@@ -41,12 +41,18 @@ type Limiter struct {
 	DomainRules   []*regexp.Regexp
 	ProtocolRules []string
 	SpeedLimit    int
-	UserOnlineIP  *sync.Map      // Key: runtimeKey|uuid, value: {Key: Ip, value: Uid}
-	OldUserOnline *sync.Map      // Key: Ip, value: Uid
-	UUIDtoUID     map[string]int // Key: UUID, value: Uid
-	UserLimitInfo *sync.Map      // Key: runtimeKey|uuid, value: UserLimitInfo
-	ConnLimiter   *ConnLimiter   // Key: runtimeKey|uuid value: ConnLimiter
-	SpeedLimiter  *sync.Map      // Key: runtimeKey|uuid, value: *ratelimit.Bucket
+	UserOnlineIP  *sync.Map // Key: runtimeKey|uuid, value: {Key: Ip, value: Uid}
+	// OldUserOnline is the brief-window "this user was just here" cache
+	// populated by GetOnlineDevice and consumed by CheckLimit. The
+	// previous bare *sync.Map grew without limit because entries were
+	// only deleted on the narrow "same uid reconnects from same ip"
+	// path. Now wrapped in a TTL-aware store; ClearOnlineIP's periodic
+	// GC sweeps stale entries (see oldUserOnlineTTL).
+	OldUserOnline *OldUserOnlineStore // Key: Ip, value: Uid (+timestamp)
+	UUIDtoUID     map[string]int      // Key: UUID, value: Uid
+	UserLimitInfo *sync.Map           // Key: runtimeKey|uuid, value: UserLimitInfo
+	ConnLimiter   *ConnLimiter        // Key: runtimeKey|uuid value: ConnLimiter
+	SpeedLimiter  *sync.Map           // Key: runtimeKey|uuid, value: *ratelimit.Bucket
 	// AliveList is the concurrency-safe view of /v1/server/alivelist.
 	// CheckLimit reads it on the data path while nodeInfoMonitor /
 	// UpdateUser write to it from the control plane, so it must never be
@@ -80,7 +86,7 @@ func AddLimiter(coreType, logicalTag string, l *conf.LimitConfig, users []panel.
 		ConnLimiter:   NewConnLimiter(l.ConnLimit, l.IPLimit, l.EnableRealtime),
 		SpeedLimiter:  new(sync.Map),
 		AliveList:     NewAliveStore(aliveList),
-		OldUserOnline: new(sync.Map),
+		OldUserOnline: NewOldUserOnlineStore(),
 	}
 	uuidmap := make(map[string]int)
 	for i := range users {
@@ -211,8 +217,8 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 					}
 				}
 			}
-		} else if v, ok := l.OldUserOnline.Load(ip); ok {
-			if v.(int) == uid {
+		} else if storedUid, ok := l.OldUserOnline.Load(ip); ok {
+			if storedUid == uid {
 				l.OldUserOnline.Delete(ip)
 			}
 		} else {
