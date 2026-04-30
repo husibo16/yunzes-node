@@ -27,6 +27,9 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 			}
 		} else {
 			log.WithFields(c.logFields()).Infof("Report %d users traffic", len(userTraffic))
+			if c.LimitConfig.EnableDynamicSpeedLimit {
+				c.feedDynamicTraffic(userTraffic)
+			}
 		}
 	}
 
@@ -71,6 +74,35 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 
 	userTraffic = nil
 	return nil
+}
+
+// feedDynamicTraffic accumulates bytes from a freshly-reported traffic
+// slice into the dynamic-speed-limit counter, keyed by uuid. UID->uuid is
+// resolved against the current c.userList; entries whose UID isn't in the
+// userList are silently dropped (they belong to a user the panel just
+// removed and the periodic refresh hasn't propagated yet — those bytes
+// don't need a limit decision).
+//
+// Called only after a successful ReportUserTraffic so each chunk of bytes
+// is counted exactly once: on report failure the rollback path puts the
+// bytes back into core's per-user counter, and the next cycle's
+// GetUserTrafficSlice will return them again. Feeding here on failure too
+// would double-count.
+func (c *Controller) feedDynamicTraffic(userTraffic []panel.UserTraffic) {
+	if c.traffic == nil || len(userTraffic) == 0 {
+		return
+	}
+	uidToUuid := make(map[int]string, len(c.userList))
+	for i := range c.userList {
+		uidToUuid[c.userList[i].Id] = c.userList[i].Uuid
+	}
+	for _, t := range userTraffic {
+		uuid, ok := uidToUuid[t.UID]
+		if !ok {
+			continue
+		}
+		c.traffic.Add(uuid, t.Upload+t.Download)
+	}
 }
 
 // userKey returns a stable identity that captures every field the node-side

@@ -29,14 +29,17 @@ import (
 //     xray-core / sing-box. Hot-path lookups (sing hook, xray dispatcher)
 //     pass sessionInbound.Tag straight in — they never split this string.
 type Controller struct {
-	server                    vCore.Core
-	apiClient                 *panel.Client
-	coreType                  string
-	logicalTag                string
-	runtimeKey                string
-	limiter                   *limiter.Limiter
-	portRegistry              *portRegistry
-	traffic                   map[string]int64
+	server       vCore.Core
+	apiClient    *panel.Client
+	coreType     string
+	logicalTag   string
+	runtimeKey   string
+	limiter      *limiter.Limiter
+	portRegistry *portRegistry
+	// traffic feeds the dynamic speed limit. Always go through its
+	// methods — reportUserTrafficTask, SpeedChecker, and nodeInfoMonitor
+	// all touch it from different goroutines.
+	traffic                   *trafficStore
 	userList                  []panel.UserInfo
 	aliveMap                  map[int]int
 	info                      *panel.NodeInfo

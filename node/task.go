@@ -55,12 +55,18 @@ func (c *Controller) startTasks(node *panel.NodeInfo) error {
 		}
 	}
 	if c.LimitConfig.EnableDynamicSpeedLimit {
-		c.traffic = make(map[string]int64)
+		if c.LimitConfig.DynamicSpeedLimitConfig == nil {
+			return fmt.Errorf("EnableDynamicSpeedLimit set but DynamicSpeedLimitConfig is nil")
+		}
+		c.traffic = newTrafficStore()
 		c.dynamicSpeedLimitPeriodic = &task.Task{
 			Interval: time.Duration(c.LimitConfig.DynamicSpeedLimitConfig.Periodic) * time.Second,
 			Execute:  c.SpeedChecker,
 		}
 		log.WithFields(c.logFields()).Info("Start dynamic speed limit")
+		if err := c.dynamicSpeedLimitPeriodic.Start(false); err != nil {
+			return fmt.Errorf("start dynamicSpeedLimit task: %w", err)
+		}
 	}
 	return nil
 }
@@ -95,7 +101,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		if newU != nil {
 			c.userList = newU
 		}
-		c.traffic = make(map[string]int64)
+		c.traffic.Reset()
 		log.WithFields(c.logFields()).Info("Node changed, reload")
 		oldRuntimeKey := c.runtimeKey
 		oldLogicalTag := c.logicalTag
@@ -178,7 +184,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		c.limiter.UpdateUser(c.runtimeKey, added, deleted)
 		if c.LimitConfig.EnableDynamicSpeedLimit {
 			for i := range deleted {
-				delete(c.traffic, deleted[i].Uuid)
+				c.traffic.Delete(deleted[i].Uuid)
 			}
 		}
 	}
@@ -189,16 +195,24 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	return nil
 }
 
+// SpeedChecker is the dynamicSpeedLimitPeriodic body. It atomically pulls
+// every uuid that crossed the configured byte threshold out of c.traffic
+// and asks the limiter to flip them into dynamic-limit mode for the
+// configured ExpireTime window. Drain clears the entries under the same
+// lock that reads them, so any bytes Add()ed concurrently land in a fresh
+// counter for the next cycle (no double-trigger, no lost bytes).
 func (c *Controller) SpeedChecker() error {
-	for u, t := range c.traffic {
-		if t >= c.LimitConfig.DynamicSpeedLimitConfig.Traffic {
-			err := c.limiter.UpdateDynamicSpeedLimit(c.runtimeKey, u,
-				c.LimitConfig.DynamicSpeedLimitConfig.SpeedLimit,
-				time.Now().Add(time.Duration(c.LimitConfig.DynamicSpeedLimitConfig.ExpireTime)*time.Minute))
-			if err != nil {
-				log.WithFields(mergeFields(c.logFields(), log.Fields{"err": err})).Error("Update dynamic speed limit failed")
-			}
-			delete(c.traffic, u)
+	cfg := c.LimitConfig.DynamicSpeedLimitConfig
+	if cfg == nil {
+		return nil
+	}
+	expire := time.Now().Add(time.Duration(cfg.ExpireTime) * time.Minute)
+	for _, uuid := range c.traffic.Drain(cfg.Traffic) {
+		if err := c.limiter.UpdateDynamicSpeedLimit(c.runtimeKey, uuid, cfg.SpeedLimit, expire); err != nil {
+			log.WithFields(mergeFields(c.logFields(), log.Fields{
+				"uuid": uuid,
+				"err":  err,
+			})).Error("Update dynamic speed limit failed")
 		}
 	}
 	return nil
